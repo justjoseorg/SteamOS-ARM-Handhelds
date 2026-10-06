@@ -1,0 +1,72 @@
+name: Update package
+
+# Builds the SteamOS Update (konkr-update) package from a release's .7z image
+# and attaches it to the release, so every release can be installed in place.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build the update package for
+        required: true
+      source_repo:
+        description: Repository whose release holds the .7z image (defaults to this one)
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      SRC: ${{ inputs.source_repo || github.repository }}
+      WORK: /mnt/konkr
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full rsync
+
+      - name: Prepare scratch space
+        run: |
+          # The image extracts to ~16 GB; /mnt is the runner's large scratch disk.
+          sudo mkdir -p "$WORK/rel" "$WORK/out" && sudo chown -R "$USER" "$WORK"
+          df -h / /mnt
+
+      - name: Download release image
+        run: gh release download "$TAG" -R "$SRC" -D "$WORK/rel" -p '*.7z*' -p 'SHA256SUMS'
+
+      - name: Build update packages
+        run: |
+          cd "$WORK/rel"
+          socs=$(ls | grep -oE -- '-sm[0-9]{4}-' | tr -d - | sort -u)
+          [ -n "$socs" ] || { echo "no SoC-specific .7z image in $TAG"; exit 1; }
+          for soc in $socs; do
+            first=$(ls | grep -E -- "-$soc-.*\.7z(\.001)?$" | head -1)
+            name="steamos-arm-handhelds-$soc-$TAG-update.tar.gz"
+            sudo python3 "$GITHUB_WORKSPACE/external-and-mods/konkr-update/image-to-package.py" \
+              "$WORK/rel/$first" --soc "$soc" --version "$TAG" \
+              --output "$WORK/out/$name" --workdir "$WORK"
+            sudo chown "$USER" "$WORK/out/$name"
+            # Release assets are capped at 2 GiB: publish the package in parts,
+            # with the checksum of the joined file.
+            (cd "$WORK/out" && sha256sum "$name" > "$name.sha256" \
+              && split -b 1900M --numeric-suffixes=1 -a 3 "$name" "$name." && rm "$name")
+          done
+          ls -la "$WORK/out"
+
+      - name: Attach to release
+        run: |
+          target="$TAG"
+          if [ "$SRC" != "$GITHUB_REPOSITORY" ]; then
+            # Building another repository's release (e.g. testing from a fork):
+            # publish to a separate prerelease here instead.
+            target="$TAG-update"
+            gh release view "$target" >/dev/null 2>&1 || gh release create "$target" --prerelease \
+              --title "$TAG update package" --notes "SteamOS Update package built from $SRC $TAG."
+          fi
+          gh release upload "$target" "$WORK"/out/* --clobber

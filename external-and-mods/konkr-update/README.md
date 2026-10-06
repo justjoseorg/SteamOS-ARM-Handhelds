@@ -4,7 +4,7 @@ This updater is under verification for v1.2. It must not be advertised as releas
 
 ## How it works
 
-1. In Desktop Mode, open **SteamOS Update** in ARM-Manager. Select the update package and paste its SHA-256 from the official GitHub release.
+1. In Desktop Mode, open **SteamOS Update** in ARM-Manager. Either hit **Check for updates** (downloads the latest release's update package and its checksum), or select a downloaded package (`.tar.gz` or its first `.001` part) and paste its SHA-256 from the official GitHub release. A release's `.7z` image (or extracted `.img`) works too: `image-to-package.py` builds the package from it after checking the release's `SHA256SUMS`.
 2. Preparation checks the archive, hashes every payload file, checks available space, and copies a private recovery runtime to HOME. It saves the current boot image and installs the recovery-capable bootstrap.
 3. On restart, the initramfs mounts the same root, boot, and HOME filesystems. It verifies their UUIDs and takes a rollback copy before replacing system files.
 4. It updates the system and the two bundled Decky plugins, verifies installed content, then boots SteamOS. Games, ROMs, saves, Steam account files, Decky settings, accounts, network credentials, and fstab are preserved.
