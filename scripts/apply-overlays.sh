@@ -1003,6 +1003,46 @@ STEAMOS_HOME="$HOME_DST" "${SCRIPT_DIR}/install-system-fixes.sh" "$R" \
   || log "WARN: system fixes incomplete"
 
 # ---------------------------------------------------------------------------
+# Purge Steam Frame VR runtime (shrink the image)
+# ---------------------------------------------------------------------------
+# The shared rootfs is Valve's Steam Frame (headset) build, not a handheld
+# build: earlier sections already mask every VR-only systemd unit with
+# `ln -sfn /dev/null`, but masking a unit does not remove the binary, driver
+# or asset it points at. None of this has any handheld hardware to drive, so
+# delete it outright instead of just disabling it. Every removal below is a
+# no-op if the path is absent, so this is safe to run against rootfs variants
+# that already lack some of these.
+log "== purge Frame-only VR runtime (dead weight on a handheld)"
+_vr_before="$(du -sm "$R" 2>/dev/null | cut -f1)"
+# SteamVR/OpenVR server-side binaries. Not vrclient.so / openvr_api.so: some
+# games probe those at startup even when they never open a VR session.
+for _b in vrserver vrcompositor vrmonitor vrwebhelper vrpathreg vrstartup \
+          vrdashboard vrcmd dsp_service; do
+  find "$R/usr/bin" "$R/usr/lib/steamos" -maxdepth 2 -type f -name "$_b" \
+    -delete 2>/dev/null || true
+done
+unset _b
+# Lighthouse base-station tracking driver + bundled firmware: the single
+# largest Frame-only payload, and only ever reached from vrserver above.
+find "$R/usr" -xdev -depth -type d -iname 'driver_lighthouse' \
+  -exec rm -rf {} + 2>/dev/null || true
+# Deckard (headset) hardware daemons: BLE, FPGA, charger, type-C logger,
+# power monitor, boot animation and factory-recovery tooling. Their units
+# are already masked above; this removes the scripts/binaries themselves.
+for _svc in iris-driver-rebind deckard-fpga deckard-led-control \
+            deckard-typec-logger deckard-charger deckard-power-monitor \
+            deckard-boot-images deckard-factory-recovery \
+            steamos-headset-fpga-config steamos-power-monitor \
+            steamos-headset-adb steamos-headset-usb-gadget; do
+  find "$R/usr/bin" "$R/usr/lib/steamos" "$R/usr/libexec" \
+    -maxdepth 2 -type f -name "$_svc" -delete 2>/dev/null || true
+done
+unset _svc
+_vr_after="$(du -sm "$R" 2>/dev/null | cut -f1)"
+log "== VR purge: rootfs ${_vr_before:-?} MiB -> ${_vr_after:-?} MiB"
+unset _vr_before _vr_after
+
+# ---------------------------------------------------------------------------
 # Ownership / extras
 # ---------------------------------------------------------------------------
 log "== permissions"
