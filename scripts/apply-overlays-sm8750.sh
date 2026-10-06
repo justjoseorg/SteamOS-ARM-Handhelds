@@ -568,6 +568,31 @@ if [[ -f "$R/etc/xdg/kdeglobals" ]]; then
   sed -i 's/^LookAndFeelPackage=.*/LookAndFeelPackage=com.valve.vapor.deck.desktop/' "$R/etc/xdg/kdeglobals"
 fi
 
+# Purge Steam Frame VR runtime (shrink the image): units above are masked,
+# not removed. Same rationale/paths as apply-overlays.sh; no-op if absent.
+log "== purge Frame-only VR runtime (dead weight on a handheld)"
+_vr_before="$(du -sm "$R" 2>/dev/null | cut -f1)"
+for _b in vrserver vrcompositor vrmonitor vrwebhelper vrpathreg vrstartup \
+          vrdashboard vrcmd dsp_service; do
+  find "$R/usr/bin" "$R/usr/lib/steamos" -maxdepth 2 -type f -name "$_b" \
+    -delete 2>/dev/null || true
+done
+unset _b
+find "$R/usr" -xdev -depth -type d -iname 'driver_lighthouse' \
+  -exec rm -rf {} + 2>/dev/null || true
+for _svc in iris-driver-rebind deckard-fpga deckard-led-control \
+            deckard-typec-logger deckard-charger deckard-power-monitor \
+            deckard-boot-images deckard-factory-recovery \
+            steamos-headset-fpga-config steamos-power-monitor \
+            steamos-headset-adb steamos-headset-usb-gadget; do
+  find "$R/usr/bin" "$R/usr/lib/steamos" "$R/usr/libexec" \
+    -maxdepth 2 -type f -name "$_svc" -delete 2>/dev/null || true
+done
+unset _svc
+_vr_after="$(du -sm "$R" 2>/dev/null | cut -f1)"
+log "== VR purge: rootfs ${_vr_before:-?} MiB -> ${_vr_after:-?} MiB"
+unset _vr_before _vr_after
+
 # Ensure correct root and user permissions across /usr and /etc
 find "$R/usr" "$R/etc" -xdev \( -uid +999 -o -gid +999 \) -exec chown -h root:root {} + 2>/dev/null || true
 
