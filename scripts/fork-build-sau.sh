@@ -71,10 +71,13 @@ for p in "$FORK"/patches/*.patch; do
 done
 for h in "$FORK"/hooks/*.sh; do
   echo "hook $(basename "$h")"
-  ROOTFS="$R" SOC="$SOC" VERSION="$VERSION" bash "$h"
+  ROOTFS="$R" SOC="$SOC" VERSION="$VERSION" BOOT_KERNEL="$W/boot/KERNEL" FORK_KERNEL="$W/KERNEL.fork" bash "$h"
 done
+# A hook may replace the boot KERNEL (write it to $FORK_KERNEL).
+KERNEL="$W/boot/KERNEL"
+[[ -f "$W/KERNEL.fork" ]] && KERNEL="$W/KERNEL.fork"
 
 echo "== building $SOC $VERSION"
 mkdir -p "$OUT"
-python3 "$HERE/scripts/build-update-v2.py" --rootfs "$R" --kernel "$W/boot/KERNEL" --soc "$SOC" \
+python3 "$HERE/scripts/build-update-v2.py" --rootfs "$R" --kernel "$KERNEL" --soc "$SOC" \
   --version "$VERSION" --sign-key "$KEY" --output "$OUT/steamos-arm-$SOC-$VERSION.sau"

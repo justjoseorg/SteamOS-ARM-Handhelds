@@ -1,0 +1,128 @@
+name: Fork components
+
+# Builds the parts of the sm8550 image that come from this repo's own sources
+# (kernel with the gyro patches, patched InputPlumber) and stores them as assets
+# of the "fork-assets" release, keyed by a hash of their sources. Upstream's
+# release images are built from older sources, so fork-sau overlays these on top.
+# A component is only rebuilt when its sources changed.
+on:
+  workflow_call:
+    outputs:
+      kernel_name:
+        value: ${{ jobs.plan.outputs.kernel_name }}
+      ip_name:
+        value: ${{ jobs.plan.outputs.ip_name }}
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - external-and-mods/kernel-sm8550/**
+      - external-and-mods/kernel-common/**
+      - external-and-mods/InputPlumber/**.patch
+      - scripts/build-inputplumber-konkr.sh
+      - .github/workflows/fork-components.yml
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      kernel_name: ${{ steps.p.outputs.kernel_name }}
+      ip_name: ${{ steps.p.outputs.ip_name }}
+      kernel: ${{ steps.p.outputs.kernel }}
+      ip: ${{ steps.p.outputs.ip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - id: p
+        run: |
+          h() { git ls-files -z "$@" | xargs -0 sha256sum | sha256sum | cut -c1-12; }
+          k=$(h external-and-mods/kernel-sm8550 external-and-mods/kernel-common)
+          i=$(h external-and-mods/InputPlumber/0001-bound-ayaneo-haptics-polling.patch external-and-mods/InputPlumber/0002-ayaneo-haptics-timed-rumble-and-steam-pulses.patch external-and-mods/InputPlumber/0003-manage-ayn-odin2-imu-uhid.patch scripts/build-inputplumber-konkr.sh)
+          echo "kernel_name=kernel-sm8550-$k.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "ip_name=inputplumber-$i" >> "$GITHUB_OUTPUT"
+          have=$(gh release view fork-assets -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          grep -qx "kernel-sm8550-$k.tar.gz" <<<"$have" && echo "kernel=false" >> "$GITHUB_OUTPUT" || echo "kernel=true" >> "$GITHUB_OUTPUT"
+          grep -qx "inputplumber-$i" <<<"$have" && echo "ip=false" >> "$GITHUB_OUTPUT" || echo "ip=true" >> "$GITHUB_OUTPUT"
+
+  kernel:
+    needs: plan
+    if: needs.plan.outputs.kernel == 'true'
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: fedora:43
+    env:
+      WORK: ${{ github.workspace }}/kernel-work
+      ROCKNIX_DIR: ${{ github.workspace }}/rocknix
+      SM8550_RECIPE: '7.2'
+      FRAME_FW_DIR: ${{ github.workspace }}/fw/frm
+    steps:
+      - name: Dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc gcc-c++ make bc bison flex python3 curl tar xz gzip cpio kmod patch perl rsync \
+            openssl-devel elfutils-libelf-devel busybox file diffutils git findutils dwarves zstd which hostname gh
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Wi-Fi firmware that is built into the kernel
+        run: |
+          mkdir fw
+          gh release download fork-assets -R "$GITHUB_REPOSITORY" -p wcn7850-frame-fw.tar.gz -O - | tar -xz -C fw
+      - name: ROCKNIX checkout
+        run: |
+          ref=$(sed -n 's/^  ROCKNIX_REF=//p' external-and-mods/kernel-sm8550/soc.env | head -1)
+          git clone --depth 1 --branch "$ref" --sparse https://github.com/ROCKNIX/distribution.git "$ROCKNIX_DIR"
+          git -C "$ROCKNIX_DIR" sparse-checkout set projects/ROCKNIX/packages/linux projects/ROCKNIX/devices/SM8550 packages/linux
+      - name: Build
+        run: bash external-and-mods/kernel-sm8550/build.sh
+      - name: Package
+        run: |
+          out=$(readlink -f "$WORK/output/current"); krel=$(basename "$out")
+          echo "built $krel"
+          tar -czf kernel.tar.gz -C "$out" boot/KERNEL "modules/$krel" "config-$krel" 2>/dev/null || tar -czf kernel.tar.gz -C "$out" boot/KERNEL "modules/$krel"
+          ls -l kernel.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel
+          path: kernel.tar.gz
+
+  inputplumber:
+    needs: plan
+    if: needs.plan.outputs.ip == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libiio-dev libudev-dev libevdev-dev clang libclang-dev pkg-config cmake
+          rustup toolchain install 1.93.1 --profile minimal
+      - name: Build
+        run: INPUTPLUMBER_BUILD_SRC="$RUNNER_TEMP/ip" bash scripts/build-inputplumber-konkr.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputplumber
+          path: external-and-mods/InputPlumber/inputplumber-0.81.0-konkr
+
+  publish:
+    needs: [plan, kernel, inputplumber]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: art
+      - run: |
+          [ ! -f art/kernel/kernel.tar.gz ] || gh release upload fork-assets art/kernel/kernel.tar.gz#${{ needs.plan.outputs.kernel_name }} -R "$GITHUB_REPOSITORY" --clobber
+          [ ! -f art/inputplumber/inputplumber-0.81.0-konkr ] || gh release upload fork-assets art/inputplumber/inputplumber-0.81.0-konkr#${{ needs.plan.outputs.ip_name }} -R "$GITHUB_REPOSITORY" --clobber

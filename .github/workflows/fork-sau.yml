@@ -82,8 +82,13 @@ jobs:
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "${{ github.event.repository.default_branch }}" \
             --title "$tag" --notes "SteamOS ARM Handhelds ${{ steps.plan.outputs.upstream_tag }} with this fork's changes. Install with SteamOS Update."
 
-  package:
+  components:
     needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    uses: ./.github/workflows/fork-components.yml
+
+  package:
+    needs: [prepare, components]
     if: needs.prepare.outputs.build == 'true'
     runs-on: ubuntu-latest
     strategy:
@@ -121,10 +126,22 @@ jobs:
           gh release download "$UP_TAG" -R "$UPSTREAM" -D "$WORK/rel" -p "*-$SOC-*.7z*" -p SHA256SUMS
           (cd "$WORK/rel" && sha256sum -c --ignore-missing SHA256SUMS)
 
+      - name: Fork components
+        if: matrix.soc == 'sm8550'
+        run: |
+          mkdir -p "$WORK/assets"
+          d="gh release download fork-assets -R $GITHUB_REPOSITORY -D $WORK/assets"
+          $d -p qcom-gyro-userspace-sm8550.tar.gz
+          $d -p "${{ needs.components.outputs.kernel_name }}"
+          $d -p "${{ needs.components.outputs.ip_name }}"
+          mv "$WORK/assets/${{ needs.components.outputs.kernel_name }}" "$WORK/assets/kernel.tar.gz"
+          mv "$WORK/assets/${{ needs.components.outputs.ip_name }}" "$WORK/assets/inputplumber"
+          echo "FORK_ASSETS=$WORK/assets" >> "$GITHUB_ENV"
+
       - name: Build package
         run: |
           first=$(ls "$WORK"/rel/*-"$SOC"-*.7z.001)
-          sudo FORK_REPO="$GITHUB_REPOSITORY" WORKDIR="$WORK" \
+          sudo FORK_REPO="$GITHUB_REPOSITORY" WORKDIR="$WORK" FORK_ASSETS="${FORK_ASSETS:-}" \
             scripts/fork-build-sau.sh "$first" "$SOC" "$VERSION" "$RUNNER_TEMP/sau.pem" "$WORK/out"
           rm -rf "$WORK/rel"
           sudo chown -R "$USER" "$WORK/out"
