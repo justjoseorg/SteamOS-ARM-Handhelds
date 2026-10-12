@@ -9,7 +9,7 @@ name: Sync upstream
 # repo + workflow). Without it the default token is used and such pushes fail.
 on:
   schedule:
-    - cron: '43 */6 * * *'
+    - cron: '43 5 * * *'
   workflow_dispatch:
 
 permissions:
