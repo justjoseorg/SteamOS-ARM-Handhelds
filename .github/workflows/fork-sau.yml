@@ -4,9 +4,10 @@ name: Fork update packages
 # upstream's release image + fork/ (overlay, patches, hooks) + this fork's
 # signing key. Devices running the fork's image update only from this repo's
 # releases. See fork/README.md.
+# GitHub can't notify a fork of upstream releases, so this polls hourly.
 on:
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '7 * * * *'
   workflow_dispatch:
     inputs:
       upstream_tag:
