@@ -1,0 +1,144 @@
+name: Fork update packages
+
+# Turns each upstream release into signed .sau update packages for this fork:
+# upstream's release image + fork/ (overlay, patches, hooks) + this fork's
+# signing key. Devices running the fork's image update only from this repo's
+# releases. See fork/README.md.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Upstream release tag to build from (default is the latest stable one)
+        required: false
+      rebuild:
+        description: Publish a new revision even if this upstream release was already built (use after changing fork/)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: hashtagbasit/SteamOS-ARM-Port
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      socs: ${{ steps.plan.outputs.socs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Plan
+        id: plan
+        run: |
+          up="${{ inputs.upstream_tag }}"
+          [ -n "$up" ] || up=$(gh release list -R "$UPSTREAM" --exclude-drafts --exclude-pre-releases -L 1 --json tagName -q '.[0].tagName')
+          base="${up#v}"
+          [[ "$base" =~ ^[0-9]+(\.[0-9]+)*$ ]] || { echo "::error::upstream tag '$up' is not a plain version"; exit 1; }
+
+          have=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts -L 200 --json tagName -q '.[].tagName' \
+                 | sed -nE "s/^v${base//./\\.}\.([0-9]+)$/\1/p" | sort -n | tail -1)
+          if [ -n "$have" ] && [ "${{ inputs.rebuild }}" != "true" ]; then
+            echo "v$base.$have already built; nothing to do"
+            echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          rev=$(( ${have:-0} + 1 ))
+          version="$base.$rev"
+
+          socs=$(python3 - "$up" <<'PY'
+          import importlib.util, json, re, subprocess, sys
+          spec = importlib.util.spec_from_file_location('u', 'external-and-mods/konkr-update/konkr-update.py')
+          u = importlib.util.module_from_spec(spec); spec.loader.exec_module(u)
+          names = subprocess.run(['gh', 'release', 'view', sys.argv[1], '-R', 'hashtagbasit/SteamOS-ARM-Port',
+                                  '--json', 'assets', '-q', '.assets[].name'], capture_output=True, text=True, check=True).stdout.split()
+          found = sorted({m[1] for n in names if (m := re.match(r'.*-(sm\d{4})-.*\.7z\.001$', n)) and m[1] in u.SOC_MODELS})
+          print(json.dumps(found))
+          PY
+          )
+          [ "$socs" != "[]" ] || { echo "::error::no supported image in $up"; exit 1; }
+
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$up" >> "$GITHUB_OUTPUT"
+          echo "socs=$socs" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          tag=${{ steps.plan.outputs.tag }}
+          gh release delete "$tag" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "${{ github.event.repository.default_branch }}" \
+            --title "$tag" --notes "SteamOS ARM Handhelds ${{ steps.plan.outputs.upstream_tag }} with this fork's changes. Install with SteamOS Update."
+
+  package:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        soc: ${{ fromJSON(needs.prepare.outputs.socs) }}
+    env:
+      WORK: /mnt/sau
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      UP_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+      SOC: ${{ matrix.soc }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Check the signing key
+        env:
+          KEY: ${{ secrets.SAU_SIGNING_KEY }}
+        run: |
+          [ -n "$KEY" ] || { echo "::error::add the SAU_SIGNING_KEY secret (private key matching fork/signing.pub)"; exit 1; }
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/sau.pem"
+          [ "$(openssl pkey -in "$RUNNER_TEMP/sau.pem" -pubout)" = "$(cat fork/signing.pub)" ] \
+            || { echo "::error::SAU_SIGNING_KEY does not match fork/signing.pub"; exit 1; }
+
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+
+      - name: Download upstream image
+        run: |
+          # ~16 GB once extracted; /mnt is the runner's large scratch disk.
+          sudo mkdir -p "$WORK/rel" "$WORK/out" && sudo chown -R "$USER" "$WORK"
+          gh release download "$UP_TAG" -R "$UPSTREAM" -D "$WORK/rel" -p "*-$SOC-*.7z*" -p SHA256SUMS
+          (cd "$WORK/rel" && sha256sum -c --ignore-missing SHA256SUMS)
+
+      - name: Build package
+        run: |
+          first=$(ls "$WORK"/rel/*-"$SOC"-*.7z.001)
+          sudo FORK_REPO="$GITHUB_REPOSITORY" WORKDIR="$WORK" \
+            scripts/fork-build-sau.sh "$first" "$SOC" "$VERSION" "$RUNNER_TEMP/sau.pem" "$WORK/out"
+          rm -rf "$WORK/rel"
+          sudo chown -R "$USER" "$WORK/out"
+          scripts/split-update.sh "$WORK/out/steamos-arm-$SOC-$VERSION.sau"
+          ls -la "$WORK/out"
+
+      - name: Upload to the release
+        run: gh release upload "$TAG" "$WORK"/out/steamos-arm-* -R "$GITHUB_REPOSITORY" --clobber
+
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sau.pem"
+
+  publish:
+    needs: [prepare, package]
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release edit "${{ needs.prepare.outputs.tag }}" -R "$GITHUB_REPOSITORY" --draft=false --latest

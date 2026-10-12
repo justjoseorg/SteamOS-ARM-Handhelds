@@ -1,0 +1,44 @@
+name: Sync upstream
+
+# Keeps the default branch current with hashtagbasit/SteamOS-ARM-Port. Fork
+# changes live in fork/ (and any commits of yours), so merges are normally clean.
+# If a merge conflicts, an issue is opened instead of pushing.
+#
+# Pushing upstream changes to .github/workflows needs a token with the
+# `workflow` scope: add it as the SYNC_TOKEN secret (a classic PAT with
+# repo + workflow). Without it the default token is used and such pushes fail.
+on:
+  schedule:
+    - cron: '43 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Merge upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/hashtagbasit/SteamOS-ARM-Port.git
+          git fetch -q upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then echo "up to date"; exit 0; fi
+          if git merge --no-edit upstream/main; then
+            git push origin HEAD
+          else
+            git merge --abort
+            gh issue create --title "Upstream sync conflict" \
+              --body "Merging hashtagbasit/SteamOS-ARM-Port main into ${GITHUB_REF_NAME} conflicts. Merge it locally (\`git fetch upstream && git merge upstream/main\`), resolve and push." || true
+            exit 1
+          fi
