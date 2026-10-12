@@ -6,6 +6,10 @@ name: Fork update packages
 # releases. See fork/README.md.
 # GitHub can't notify a fork of upstream releases, so this polls daily.
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
   schedule:
     - cron: '7 6 * * *'
   workflow_dispatch:
@@ -21,6 +25,9 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: fork-sau
+
 env:
   UPSTREAM: hashtagbasit/SteamOS-ARM-Port
   GH_TOKEN: ${{ github.token }}
@@ -33,6 +40,7 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       version: ${{ steps.plan.outputs.version }}
       upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      head: ${{ steps.plan.outputs.head }}
       socs: ${{ steps.plan.outputs.socs }}
     steps:
       - uses: actions/checkout@v4
@@ -49,10 +57,15 @@ jobs:
 
           have=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts -L 200 --json tagName -q '.[].tagName' \
                  | sed -nE "s/^v${base//./\\.}\.([0-9]+)$/\1/p" | sort -n | tail -1)
-          if [ -n "$have" ] && [ "${{ inputs.rebuild }}" != "true" ]; then
-            echo "v$base.$have already built; nothing to do"
+          # A new revision is due when upstream has a new release or this repo's
+          # main moved since the last revision was built.
+          head=$(git rev-parse HEAD)
+          if [ -n "$have" ] && [ "${{ inputs.rebuild }}" != "true" ] \
+             && gh release view "v$base.$have" -R "$GITHUB_REPOSITORY" --json body -q .body | grep -q "main@$head"; then
+            echo "v$base.$have already built from main@$head; nothing to do"
             echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          echo "head=$head" >> "$GITHUB_OUTPUT"
           rev=$(( ${have:-0} + 1 ))
           version="$base.$rev"
 
@@ -80,7 +93,7 @@ jobs:
           tag=${{ steps.plan.outputs.tag }}
           gh release delete "$tag" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "${{ github.event.repository.default_branch }}" \
-            --title "$tag" --notes "SteamOS ARM Handhelds ${{ steps.plan.outputs.upstream_tag }} with this fork's changes. Install with SteamOS Update."
+            --title "$tag" --notes "SteamOS ARM Handhelds ${{ steps.plan.outputs.upstream_tag }} with this fork's changes. Install with SteamOS Update. Built from main@${{ steps.plan.outputs.head }}"
 
   components:
     needs: prepare
