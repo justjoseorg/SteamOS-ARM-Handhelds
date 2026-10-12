@@ -17,9 +17,6 @@ upstream main    ──► fork-sync.yml ──► merged into main
 - `patches/*.patch` are applied with `patch -p1` from the rootfs root.
 - `hooks/*.sh` run last as root with `ROOTFS`, `SOC` and `VERSION` set.
 
-- `patches/0001-…` makes the updater download to the mounted SD card (the one with the most free space) instead of internal storage.
-  The package is deleted after staging or on failure, and leftovers from an interrupted download are removed on the next try.
-
 Only `/usr`, `/opt`, `/etc` (minus accounts, `ssh`, etc.), the kernel and the two Decky plugins are shipped by updates,
 so changes must land there. Anything under `/etc/ssh` is deliberately preserved by the updater, hence SSH is enabled via `/usr`.
 
