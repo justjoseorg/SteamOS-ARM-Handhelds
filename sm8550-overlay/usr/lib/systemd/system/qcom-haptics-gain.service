@@ -1,0 +1,10 @@
+[Unit]
+Description=Set the PMIC haptic motor gain
+After=inputplumber.service systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/qcom-haptics-gain
+
+[Install]
+WantedBy=multi-user.target

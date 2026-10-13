@@ -1,0 +1,24 @@
+#!/usr/bin/python3
+# Set the force-feedback gain of the PMIC haptic motor. At full gain the motor
+# is too strong for rumble, so run it at 50% (override: QCOM_HAPTICS_GAIN, 0-65535).
+import glob
+import os
+import struct
+import sys
+
+EV_FF, FF_GAIN = 0x15, 0x60
+gain = int(os.environ.get("QCOM_HAPTICS_GAIN", "32768"))
+
+for name_file in glob.glob("/sys/class/input/event*/device/name"):
+    with open(name_file) as f:
+        if f.read().strip() != "qcom-hv-haptics":
+            continue
+    dev = "/dev/input/" + name_file.split("/")[4]
+    fd = os.open(dev, os.O_WRONLY)
+    # struct input_event: timeval (2 longs), type, code, value
+    os.write(fd, struct.pack("llHHi", 0, 0, EV_FF, FF_GAIN, gain))
+    os.close(fd)
+    print(f"{dev}: gain {gain}")
+    sys.exit(0)
+
+print("qcom-hv-haptics not found")

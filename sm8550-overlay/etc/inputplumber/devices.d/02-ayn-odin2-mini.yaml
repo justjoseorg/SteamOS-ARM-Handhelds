@@ -57,6 +57,13 @@ source_devices:
     evdev:
       name: "AYN Odin2 IMU*"
       handler: event*
+  # PMIC haptic motor: rumble from the game is uploaded to every source with
+  # force feedback, so the pad's motor and this one play together.
+  - group: gamepad
+    evdev:
+      name: qcom-hv-haptics
+      handler: event*
+    passthrough: false
 
 options:
   auto_manage: true
