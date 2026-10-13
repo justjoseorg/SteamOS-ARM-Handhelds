@@ -124,5 +124,5 @@ jobs:
         with:
           path: art
       - run: |
-          [ ! -f art/kernel/kernel.tar.gz ] || gh release upload fork-assets art/kernel/kernel.tar.gz#${{ needs.plan.outputs.kernel_name }} -R "$GITHUB_REPOSITORY" --clobber
-          [ ! -f art/inputplumber/inputplumber-0.81.0-konkr ] || gh release upload fork-assets art/inputplumber/inputplumber-0.81.0-konkr#${{ needs.plan.outputs.ip_name }} -R "$GITHUB_REPOSITORY" --clobber
+          [ ! -f art/kernel/kernel.tar.gz ] || { mv art/kernel/kernel.tar.gz "art/kernel/${{ needs.plan.outputs.kernel_name }}"; gh release upload fork-assets "art/kernel/${{ needs.plan.outputs.kernel_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
+          [ ! -f art/inputplumber/inputplumber-0.81.0-konkr ] || { mv art/inputplumber/inputplumber-0.81.0-konkr "art/inputplumber/${{ needs.plan.outputs.ip_name }}"; gh release upload fork-assets "art/inputplumber/${{ needs.plan.outputs.ip_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
