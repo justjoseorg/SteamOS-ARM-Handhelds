@@ -44,7 +44,7 @@ jobs:
         run: |
           h() { git ls-files -z "$@" | xargs -0 sha256sum | sha256sum | cut -c1-12; }
           k=$(h external-and-mods/kernel-sm8550 external-and-mods/kernel-common)
-          i=$(h external-and-mods/InputPlumber/0001-bound-ayaneo-haptics-polling.patch external-and-mods/InputPlumber/0002-ayaneo-haptics-timed-rumble-and-steam-pulses.patch external-and-mods/InputPlumber/0003-manage-ayn-odin2-imu-uhid.patch scripts/build-inputplumber-konkr.sh)
+          i=$(h external-and-mods/InputPlumber/0001-bound-ayaneo-haptics-polling.patch external-and-mods/InputPlumber/0002-ayaneo-haptics-timed-rumble-and-steam-pulses.patch external-and-mods/InputPlumber/0003-manage-ayn-odin2-imu-uhid.patch external-and-mods/InputPlumber/0004-pmic-haptics-rumble-as-flat-constant.patch scripts/build-inputplumber-konkr.sh)
           echo "kernel_name=kernel-sm8550-$k.tar.gz" >> "$GITHUB_OUTPUT"
           echo "ip_name=inputplumber-$i" >> "$GITHUB_OUTPUT"
           have=$(gh release view fork-assets -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')

@@ -1,0 +1,79 @@
+diff --git a/src/input/source/evdev/gamepad.rs b/src/input/source/evdev/gamepad.rs
+index de2661f..523bd97 100644
+--- a/src/input/source/evdev/gamepad.rs
++++ b/src/input/source/evdev/gamepad.rs
+@@ -3,7 +3,7 @@ use std::os::fd::AsFd;
+ use std::{collections::HashMap, error::Error};
+ 
+ use evdev::{
+-    AbsInfo, AbsoluteAxisCode, Device, EventType, FFEffect, FFEffectData, FFEffectKind, FFReplay,
++    AbsInfo, AbsoluteAxisCode, Device, EventType, FFEffect, FFEffectData, FFEffectKind, FFEnvelope, FFReplay,
+     FFTrigger, InputEvent,
+ };
+ use nix::fcntl::{FcntlArg, OFlag};
+@@ -27,6 +27,41 @@ use crate::{
+     udev::device::UdevDevice,
+ };
+ 
++/// The PMIC haptic motor plays a rumble effect as a rough buzz. A flat
++/// constant effect feels much cleaner, so rumble is converted to one: the
++/// stronger motor magnitude sets the level, with a floor so weak rumble is felt.
++const HAPTICS_NAME: &str = "qcom-hv-haptics";
++const HAPTICS_FLOOR: i32 = 6000;
++const HAPTICS_CEIL: i32 = 24000;
++
++fn haptics_effect(effect: FFEffectData) -> FFEffectData {
++    let FFEffectKind::Rumble {
++        strong_magnitude,
++        weak_magnitude,
++    } = effect.kind
++    else {
++        return effect;
++    };
++    let mag = strong_magnitude.max(weak_magnitude) as i32;
++    let level = if mag == 0 {
++        0
++    } else {
++        HAPTICS_FLOOR + mag * (HAPTICS_CEIL - HAPTICS_FLOOR) / 65535
++    };
++    FFEffectData {
++        kind: FFEffectKind::Constant {
++            level: level as i16,
++            envelope: FFEnvelope {
++                attack_length: 0,
++                attack_level: 0,
++                fade_length: 0,
++                fade_level: 0,
++            },
++        },
++        ..effect
++    }
++}
++
+ /// Source device implementation for evdev gamepads
+ pub struct GamepadEventDevice {
+     device: Device,
+@@ -675,6 +710,11 @@ impl SourceOutputDevice for GamepadEventDevice {
+             log::debug!("Device does not support FF effects");
+             return Ok(-1);
+         }
++        let effect = if self.device.name() == Some(HAPTICS_NAME) {
++            haptics_effect(effect)
++        } else {
++            effect
++        };
+         match self.device.upload_ff_effect(effect) {
+             Ok(effect) => {
+                 let id = effect.id() as i16;
+@@ -692,6 +732,11 @@ impl SourceOutputDevice for GamepadEventDevice {
+             log::debug!("Device does not support FF effects");
+             return Ok(());
+         }
++        let effect = if self.device.name() == Some(HAPTICS_NAME) {
++            haptics_effect(effect)
++        } else {
++            effect
++        };
+         let Some(current_effect) = self.ff_effects.get_mut(&effect_id) else {
+             log::warn!("Unable to find existing FF effect with id {effect_id}");
+             return Ok(());
