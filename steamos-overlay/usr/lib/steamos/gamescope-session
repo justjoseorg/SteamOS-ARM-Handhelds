@@ -37,10 +37,11 @@ fi
 
 export XCURSOR_THEME="${XCURSOR_THEME:-steam}"
 
-# SM8550: GL through zink, else Xwayland has no glamor/GLX. mangoapp was
-# off here because it needs GLX; with zink it has it again (the mangoapp
-# wrapper leaves it on the image's own A740 Turnip).
-if grep -aq "qcom,sm8550" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
+# SM8550 / SM8250: GL through zink, else Xwayland has no glamor/GLX. mangoapp
+# was off here because it needs GLX; with zink it has it again (the mangoapp
+# wrapper leaves it on the image's own Turnip). Both images carry our
+# Turnip-only Mesa, which has no native GL driver.
+if grep -aq -e "qcom,sm8550" -e "qcom,sm8250" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
   export MESA_LOADER_DRIVER_OVERRIDE=zink
 fi
 
@@ -111,7 +112,11 @@ export GAMESCOPE_DISABLE_ASYNC_FLIPS=1
 # `konkrctl`-managed flag /var/lib/konkrd/kms-rotation, which lets gamescope
 # scan games out directly instead of compositing every frame. Two failed
 # starts in a row turn the flag off again.
-export GAMESCOPE_FORCE_INTERNAL="${GAMESCOPE_FORCE_INTERNAL:-1}"
+# A monitor on USB-C/HDMI takes over Game Mode while it's connected (like the
+# Deck): before, the panel was forced and an external screen stayed black in
+# Game Mode, which also left HDMI/DP audio silent (no stream to carry it).
+# GAMESCOPE_FORCE_INTERNAL=1 keeps the panel.
+export GAMESCOPE_FORCE_INTERNAL="${GAMESCOPE_FORCE_INTERNAL:-0}"
 # Same physical size the working SM8550 session advertises (not connector mm).
 export GAMESCOPE_FAKE_OUTPUT_MM="${GAMESCOPE_FAKE_OUTPUT_MM:-177x100}"
 if [[ "$MANGOAPP" != 1 ]]; then
@@ -205,6 +210,12 @@ MIN_HZ=60
 MAX_HZ="$(/usr/lib/steamos/panel-modes --max "$OUTPUT" 2>/dev/null)"
 [[ "$MAX_HZ" =~ ^[0-9]+$ ]] || MAX_HZ=60
 (( MAX_HZ >= 60 )) || MAX_HZ=60
+# Retroid Pocket 5 / Flip 2 with the CH13726A OLED: 60 Hz only, the faster
+# modes its driver lists don't hold on these panels (the Visionox versions do
+# 120). Same limit as the other 865 Linux ports.
+case "$(tr -d '\0' </sys/firmware/devicetree/base/model 2>/dev/null)" in
+  "Retroid Pocket 5"|"Retroid Pocket Flip2") MAX_HZ=60; PANEL_60_ONLY=1 ;;
+esac
 # Start the Steam UI at 60 Hz: at 144 it redraws menus 144x/s, which roughly
 # doubles UI GPU/CPU load (heat, fan, sluggishness). Steam's refresh slider
 # (STEAM_DISPLAY_REFRESH_LIMITS) still reaches MAX_HZ per game.
@@ -215,6 +226,7 @@ REFRESH_HZ="${REFRESH_HZ:-60}"
 # 60,90,120,144 -> limits 30/60/90/120/144). Only a panel that lists a single
 # rate above 60 Hz gets the old 60-to-max range, so it still has a slider.
 PANEL_RATES="$(/usr/lib/steamos/panel-modes --rates "$OUTPUT" 2>/dev/null)"
+[[ -n "${PANEL_60_ONLY:-}" ]] && PANEL_RATES=60
 if [[ "$PANEL_RATES" =~ ^[0-9]+(,[0-9]+)+$ ]]; then
   export STEAM_DISPLAY_REFRESH_LIMITS="${STEAM_DISPLAY_REFRESH_LIMITS:-${PANEL_RATES}}"
 elif (( MAX_HZ > 60 )); then
@@ -236,6 +248,11 @@ case "$DEVICE_MODEL" in
     # Top panel is DSI-2 on dsi1 (ae96000), the bottom DSI-1 on dsi0 (ae94000),
     # same as Armada's Thor. Beta 7 had these the other way round.
     TOP_BACKLIGHT=/sys/class/backlight/ae96000.dsi.0 ;;
+  "AYN Thor Lite")
+    # Same layout as the Thor on the 865: top panel on dsi1 (ae96000), the
+    # bottom one on dsi0 (ae94000), touchscreens labelled like ROCKNIX's Thor.
+    export GAMESCOPE_IGNORE_TOUCH="${GAMESCOPE_IGNORE_TOUCH:-bottom_touchscreen}"
+    TOP_BACKLIGHT=/sys/class/backlight/ae96000.dsi.0 ;;
   "AYANEO Pocket DS")
     export GAMESCOPE_IGNORE_TOUCH="${GAMESCOPE_IGNORE_TOUCH:-Goodix Capacitive TouchScreen}"
     TOP_BACKLIGHT=/sys/class/backlight/ae94000.dsi.0 ;;
@@ -252,6 +269,12 @@ fi
 # Not forced here yet: our auto already shows the Thor right, and the RP6
 # report is mirrored touch, not an upside-down picture.
 PANEL_ORIENT="${GAMESCOPE_ORIENTATION:-}"
+# Lenovo tablets: Game Mode turned the other way up (Handheld Control's "Flip
+# screen", /etc/steamos-arm/flip-screen), for controllers that plug into the
+# short side. Both run the panel "right"; touch follows through udev.
+if [[ -e /etc/steamos-arm/flip-screen ]] && grep -aqE "lenovo,(tb321fu|elden|baldur)" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
+  PANEL_ORIENT=left
+fi
 
 # Bottom screen (bottom-screen.service): lend the second panel to its own
 # gamescope through a DRM lease, where the dashboard runs. Off with
@@ -290,13 +313,29 @@ if grep -aqE "ayn,odin3|qcom,sm8750" /sys/firmware/devicetree/base/compatible 2>
   IS_ODIN3=1
 fi
 
+# Scanout format and buffer layout. The Legion Y700 Gen 4's display driver
+# showed Game Mode black (backlight on, gamescope running) with gamescope's
+# default 10-bit scanout, where its desktop runs 8-bit: 8 bpc there. The
+# kernel cmdline can override both, so a boot.img can try a variant without
+# touching the install: steamos.gamescope.8bit=0|1, steamos.gamescope.modifiers=0|1.
+if grep -aq "lenovo,elden" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
+  export GAMESCOPE_PREFER_8BIT="${GAMESCOPE_PREFER_8BIT:-1}"
+fi
+for arg in $(cat /proc/cmdline 2>/dev/null); do
+  case "$arg" in
+    steamos.gamescope.8bit=*) export GAMESCOPE_PREFER_8BIT="${arg#*=}" ;;
+    steamos.gamescope.modifiers=0) export GAMESCOPE_DISABLE_MODIFIERS=1 ;;
+    steamos.gamescope.modifiers=1) unset GAMESCOPE_DISABLE_MODIFIERS ;;
+  esac
+done
+
 # DRM backend = Wayland compositor + Xwayland. Steam paints on X11 (:0 / xcb).
 # --backend wayland/sdl would nest inside another compositor and drop the panel.
 GAMESCOPE_ARGS=(
   --backend drm
   --prefer-output "$OUTPUT"
 )
-if [[ "$IS_ODIN3" != 1 ]]; then
+if [[ "$GAMESCOPE_FORCE_INTERNAL" == 1 ]]; then
   GAMESCOPE_ARGS+=(--force-internal)
 fi
 GAMESCOPE_ARGS+=(
@@ -341,11 +380,20 @@ if [[ "${GAMESCOPE_SESSION_TARGET}" != "gamescope-session.target" ]]; then
   WATCH_SERVICE="steamvr-nested-desktop.service"
 fi
 
+# mangoapp sizes its text in pixels for the Deck's 800 lines, so on the
+# tablets (1904 lines on the Legion Y700 Gen 4) the performance overlay was
+# a sliver in the corner. Scale it to the panel; read_cfg keeps Steam's
+# preset file (MANGOHUD_CONFIGFILE) in use, which MANGOHUD_CONFIG alone skips.
+if [[ "$MANGOAPP" == 1 && -z "${MANGOHUD_CONFIG:-}" && "$H" -gt 1200 ]]; then
+  MANGOHUD_CONFIG="read_cfg,font_scale=$(awk -v h="$H" 'BEGIN { printf "%.1f", h / 800 }')"
+  export MANGOHUD_CONFIG
+fi
+
 # Steam (steam.service) does not inherit this script's environment, and the
 # gamescope-onready import races Steam's start: Steam then has no refresh-rate
 # slider (only 144/n frame limits) and no STEAM_USE_MANGOAPP. Hand the Steam
 # session vars over through a file steam.service reads at start.
-env | grep -E '^(STEAM_DISPLAY_REFRESH_LIMITS|STEAM_USE_MANGOAPP|STEAM_MANGOAPP_[A-Z_]+|STEAM_DISABLE_MANGOAPP_ATOM_WORKAROUND|GAMESCOPE_MANGOAPP_SOCKET_DISABLE|MANGOHUD_CONFIGFILE)=' \
+env | grep -E '^(STEAM_DISPLAY_REFRESH_LIMITS|STEAM_USE_MANGOAPP|STEAM_MANGOAPP_[A-Z_]+|STEAM_DISABLE_MANGOAPP_ATOM_WORKAROUND|GAMESCOPE_MANGOAPP_SOCKET_DISABLE|MANGOHUD_CONFIGFILE|MANGOHUD_CONFIG)=' \
   >"$XDG_RUNTIME_DIR/gamescope-steam.env" 2>/dev/null || true
 
 echo >&2 "gamescope-session: output=$OUTPUT panel=${PANEL_W}x${PANEL_H} nested=${W}x${H}@${REFRESH_HZ} max=${MAX_HZ} mangoapp=${MANGOAPP} kms_rotation=${KMS_ROTATION} ignore_touch=${GAMESCOPE_IGNORE_TOUCH:-} bottom=${GAMESCOPE_LEASE_CONNECTOR:-none} orientation=${PANEL_ORIENT:-auto}"

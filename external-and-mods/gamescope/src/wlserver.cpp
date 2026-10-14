@@ -255,7 +255,14 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 
 	if (wlserver_x11_surface_info)
 	{
-		assert(wlserver_x11_surface_info->xwayland_server);
+		// The window can lose its Xwayland server while the display comes
+		// back from sleep; drop the frame then instead of aborting gamescope
+		// (which took Game Mode down on wake).
+		if ( !wlserver_x11_surface_info->xwayland_server )
+		{
+			wlr_buffer_unlock( entry.buf );
+			return;
+		}
 		wlserver_x11_surface_info->xwayland_server->wayland_commit( std::move( entry ) );
 	}
 	else if (wlserver_xdg_surface_info)
@@ -951,9 +958,10 @@ void gamescope_xwayland_server_t::handle_override_window_content( struct wl_clie
 				ResListEntry_t pending = std::move( *it );
 
                 // Still have the buffer lock from before...
-                assert(x11_surface);
-                assert(x11_surface->xwayland_server);
-                x11_surface->xwayland_server->wayland_commit( std::move( pending ) );
+                if ( x11_surface->xwayland_server )
+                    x11_surface->xwayland_server->wayland_commit( std::move( pending ) );
+                else
+                    wlr_buffer_unlock( pending.buf );
 
                 it = g_PendingCommits.erase(it);
             }
@@ -3041,6 +3049,18 @@ void wlserver_keyboardfocus( struct wlr_surface *surface, bool bConstrain )
 		}
 	}
 
+	// Nothing to focus (on wake, before any window is back): wlroots asserts
+	// on a null surface in notify_enter, which took Game Mode down. Clear the
+	// focus instead.
+	if ( surface == nullptr )
+	{
+		wlr_seat_keyboard_notify_clear_focus( wlserver.wlr.seat );
+		wlserver.kb_focus_surface = nullptr;
+		if ( bConstrain )
+			wlserver_constrain_cursor( nullptr );
+		return;
+	}
+
 	assert( wlserver.wlr.virtual_keyboard_device != nullptr );
 	wlr_seat_set_keyboard( wlserver.wlr.seat, wlserver.wlr.virtual_keyboard_device );
 
@@ -4025,9 +4045,10 @@ static void wlserver_x11_surface_info_set_wlr( struct wlserver_x11_surface_info 
 
 			// Still have the buffer lock from before...
 			wlserver_x11_surface_info *wlserver_x11_surface_info = get_wl_surface_info(wlr_surf)->x11_surface;
-			assert(wlserver_x11_surface_info);
-			assert(wlserver_x11_surface_info->xwayland_server);
-			wlserver_x11_surface_info->xwayland_server->wayland_commit( std::move( pending ) );
+			if ( wlserver_x11_surface_info && wlserver_x11_surface_info->xwayland_server )
+				wlserver_x11_surface_info->xwayland_server->wayland_commit( std::move( pending ) );
+			else
+				wlr_buffer_unlock( pending.buf );
 
 			it = g_PendingCommits.erase(it);
 		}

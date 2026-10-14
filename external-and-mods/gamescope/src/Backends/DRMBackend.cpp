@@ -1129,30 +1129,31 @@ static uint32_t connector_mode_area( gamescope::CDRMConnector *pConnector )
 	return uint32_t( pModeConnector->modes[0].hdisplay ) * uint32_t( pModeConnector->modes[0].vdisplay );
 }
 
+// External screens (DP over USB-C, HDMI) only stay out with --force-internal
+// / GAMESCOPE_FORCE_INTERNAL=1 (or Steam's own "use the internal display"
+// switch). Otherwise a connected monitor takes over, as on the Deck.
 static bool drm_skip_external_connectors( struct drm_t *drm )
 {
 	if ( env_to_bool( getenv( "GAMESCOPE_ALLOW_HDMI" ) ) || env_to_bool( getenv( "GAMESCOPE_ALLOW_EXTERNAL" ) ) )
 		return false;
-	if ( g_bForceInternal )
-		return true;
-	for ( auto &iter : drm->connectors )
-	{
-		gamescope::CDRMConnector *pConnector = &iter.second;
-		if ( pConnector->GetScreenType() == gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL &&
-			 pConnector->GetModeConnector()->connection == DRM_MODE_CONNECTED )
-			return true;
-	}
-	return false;
+	return g_bForceInternal;
 }
 
 static bool connector_better_than( struct drm_t *drm, gamescope::CDRMConnector *pCandidate, gamescope::CDRMConnector *pBest )
 {
+	// A monitor with modes beats the panel (--prefer-output names the panel,
+	// so this goes first). One that reports connected without any mode (a
+	// USB-C dock or adapter with nothing behind it) never takes the screen.
+	if ( pCandidate->GetScreenType() != pBest->GetScreenType() )
+	{
+		gamescope::CDRMConnector *pExternal = pCandidate->GetScreenType() == gamescope::GAMESCOPE_SCREEN_TYPE_EXTERNAL ? pCandidate : pBest;
+		const bool bExternalUsable = pExternal->GetModeConnector()->count_modes > 0;
+		return ( pCandidate == pExternal ) == bExternalUsable;
+	}
 	const int nCandidatePriority = get_connector_priority( drm, pCandidate->GetName() );
 	const int nBestPriority = get_connector_priority( drm, pBest->GetName() );
 	if ( nCandidatePriority != nBestPriority )
 		return nCandidatePriority < nBestPriority;
-	if ( pCandidate->GetScreenType() != pBest->GetScreenType() )
-		return pCandidate->GetScreenType() == gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL;
 	return connector_mode_area( pCandidate ) > connector_mode_area( pBest );
 }
 
@@ -2139,6 +2140,13 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 	if (drmGetCap(drm->fd, DRM_CAP_ADDFB2_MODIFIERS, &cap) == 0 && cap != 0) {
 		drm->allow_modifiers = true;
 	}
+	// SteamOS-ARM: linear scanout buffers only (no tiling or UBWC), for display
+	// drivers that list compressed formats they don't show correctly.
+	if ( drm->allow_modifiers && env_to_bool( getenv( "GAMESCOPE_DISABLE_MODIFIERS" ) ) )
+	{
+		drm_log.infof( "GAMESCOPE_DISABLE_MODIFIERS: linear scanout buffers only" );
+		drm->allow_modifiers = false;
+	}
 
 	g_bSupportsAsyncFlips = drmGetCap(drm->fd, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, &cap) == 0 && cap != 0;
 	if (!g_bSupportsAsyncFlips)
@@ -2229,7 +2237,15 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 	// 2. When compositing HDR content as a fallback when we undock, it avoids introducing
 	// a bunch of horrible banding when going to G2.2 curve.
 	// It ensures that we can dither that.
-	g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XRGB2101010, DRM_FORMAT_ARGB2101010);
+	// SteamOS-ARM: GAMESCOPE_PREFER_8BIT scans out 8 bpc like a desktop
+	// compositor, for display drivers whose 10-bit scanout stays black.
+	g_nDRMFormat = DRM_FORMAT_INVALID;
+	if ( env_to_bool( getenv( "GAMESCOPE_PREFER_8BIT" ) ) ) {
+		g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888);
+		drm_log.infof( "GAMESCOPE_PREFER_8BIT: 8 bpc scanout" );
+	}
+	if ( g_nDRMFormat == DRM_FORMAT_INVALID )
+		g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XRGB2101010, DRM_FORMAT_ARGB2101010);
 	if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
 		g_nDRMFormat = pick_plane_format(&drm->primary_formats, DRM_FORMAT_XBGR2101010, DRM_FORMAT_ABGR2101010);
 		if ( g_nDRMFormat == DRM_FORMAT_INVALID ) {
@@ -2243,7 +2259,11 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 
 	if (have_overlay_planes(drm)) {
 		// ARGB8888 is the Xformat and AFormat here in this function as we want transparent overlay
-		g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB2101010);
+		g_nDRMFormatOverlay = DRM_FORMAT_INVALID;
+		if ( env_to_bool( getenv( "GAMESCOPE_PREFER_8BIT" ) ) )
+			g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB8888);
+		if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID )
+			g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB2101010);
 		if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
 			g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR2101010);
 			if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {

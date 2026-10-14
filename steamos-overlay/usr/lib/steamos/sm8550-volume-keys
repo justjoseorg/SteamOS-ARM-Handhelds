@@ -2,6 +2,10 @@
 """Odin2 volume rocker: gpio-keys = VOLUP, pmic_resin = VOLDOWN → wpctl.
 
 Do not grab USB/Bluetooth keyboards, mice, or the gamepad.
+
+Holding a volume button keeps stepping until it is let go: these buttons
+send no key repeats, so the step repeats here after HOLD_DELAY seconds, then
+every HOLD_INTERVAL seconds.
 """
 from __future__ import annotations
 
@@ -18,15 +22,22 @@ import sys
 EVENT_FMT = "llHHi"
 EVENT_SIZE = struct.calcsize(EVENT_FMT)
 EV_KEY = 0x01
+EV_REL = 0x02
+REL_WHEEL = 0x08
 KEY_MUTE = 113
 KEY_VOLUMEDOWN = 114
 KEY_VOLUMEUP = 115
 STEP = os.environ.get("SM8550_VOLUME_STEP", "5%")
 LIMIT = os.environ.get("SM8550_VOLUME_LIMIT", "1.0")
+HOLD_DELAY = float(os.environ.get("SM8550_VOLUME_HOLD_DELAY", "0.4"))
+HOLD_INTERVAL = float(os.environ.get("SM8550_VOLUME_HOLD_INTERVAL", "0.1"))
 # InputPlumber's keyboard too: on the RP6 it grabs gpio-keys for the back
 # paddles, so Volume Up only comes through its keyboard (a grabbed device's
 # raw events reach nobody else, so nothing is counted twice).
 ALLOW = ("gpio-keys", "pmic_resin", "inputplumber keyboard")
+# The AYANEO Pocket DMG's volume wheel: the mouse interface of "AYANEO DEVICE",
+# a scroll wheel (InputPlumber leaves that interface alone on the DMG).
+WHEEL = ("ayaneo device",)
 
 
 def log(msg: str) -> None:
@@ -73,19 +84,30 @@ def has_volume_keys(fd: int) -> bool:
     return bit(KEY_VOLUMEUP) or bit(KEY_VOLUMEDOWN) or bit(KEY_MUTE)
 
 
+def has_wheel(fd: int) -> bool:
+    buf = array.array("B", [0] * 2)
+    ioc = (2 << 30) | (ord("E") << 8) | (0x20 + EV_REL) | (len(buf) << 16)
+    try:
+        fcntl.ioctl(fd, ioc, buf, True)
+    except OSError:
+        return False
+    return bool(buf[REL_WHEEL // 8] & (1 << (REL_WHEEL % 8)))
+
+
 def open_devices(skip: frozenset = frozenset()) -> list[tuple[str, int]]:
     opened: list[tuple[str, int]] = []
     for path in sorted(glob.glob("/dev/input/event*")):
         if path in skip:
             continue
         dname = device_name(path).lower()
-        if not any(a in dname for a in ALLOW):
+        wheel_dev = any(a in dname for a in WHEEL)
+        if not wheel_dev and not any(a in dname for a in ALLOW):
             continue
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
         except OSError:
             continue
-        if not has_volume_keys(fd):
+        if not (has_wheel(fd) if wheel_dev else has_volume_keys(fd)):
             os.close(fd)
             continue
         log(f"watch {path} ({dname})")
@@ -124,6 +146,8 @@ def main() -> int:
     if not fds:
         log("no volume devices yet, waiting")
     last_scan = time.monotonic()
+    held: tuple[int, int] | None = None   # (fd, key) of the volume key held down
+    next_repeat = 0.0
     while True:
         # InputPlumber recreates its keyboard when its devices change: drop
         # handles that died and pick up new devices every 10 s.
@@ -133,13 +157,19 @@ def main() -> int:
                 if not os.path.exists(path):
                     os.close(fd)
                     del fds[fd]
+                    if held and held[0] == fd:
+                        held = None
             for path, fd in open_devices(frozenset(fds.values())):
                 fds[fd] = path
         if not fds:
             time.sleep(2)
             continue
+        if held and time.monotonic() >= next_repeat:
+            apply(held[1])
+            next_repeat = max(next_repeat + HOLD_INTERVAL, time.monotonic())
+        timeout = 2.0 if not held else max(0.0, next_repeat - time.monotonic())
         try:
-            ready, _, _ = select.select(list(fds), [], [], 2.0)
+            ready, _, _ = select.select(list(fds), [], [], timeout)
         except InterruptedError:
             continue
         for fd in ready:
@@ -149,11 +179,23 @@ def main() -> int:
                 log(f"lost {fds[fd]}")
                 os.close(fd)
                 del fds[fd]
+                if held and held[0] == fd:
+                    held = None
                 continue
             for off in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
                 _s, _us, etype, code, value = struct.unpack_from(EVENT_FMT, data, off)
-                if etype == EV_KEY and value == 1:
+                if etype == EV_REL and code == REL_WHEEL and value:
+                    apply(KEY_VOLUMEUP if value > 0 else KEY_VOLUMEDOWN)
+                    continue
+                if etype != EV_KEY:
+                    continue
+                if value == 1:
                     apply(code)
+                    if code in (KEY_VOLUMEUP, KEY_VOLUMEDOWN):
+                        held = (fd, code)
+                        next_repeat = time.monotonic() + HOLD_DELAY
+                elif value == 0 and held == (fd, code):
+                    held = None
     return 0
 
 

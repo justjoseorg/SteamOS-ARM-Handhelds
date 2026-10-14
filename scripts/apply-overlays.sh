@@ -183,6 +183,13 @@ install_file "$OVL/usr/lib/steamos/sm8550-prepare-plasma" \
   "$R/usr/lib/steamos/sm8550-prepare-plasma" 0755
 install_file "$OVL/usr/lib/steamos/sm8550-startplasma" \
   "$R/usr/lib/steamos/sm8550-startplasma" 0755
+# Desktop Mode's Steam autostart through desktop-steam: Steam's on-screen
+# keyboard fits narrow panels (AYANEO Pocket DMG).
+install_file "$OVL/usr/lib/steamos/desktop-steam" "$R/usr/lib/steamos/desktop-steam" 0755
+if [[ -f "$R/etc/xdg/autostart/steam.desktop" ]]; then
+  sed -i 's|^Exec=/usr/bin/steam |Exec=/usr/lib/steamos/desktop-steam |' "$R/etc/xdg/autostart/steam.desktop"
+  grep -q '^Exec=/usr/lib/steamos/desktop-steam ' "$R/etc/xdg/autostart/steam.desktop" || die "Steam autostart not redirected"
+fi
 backup "$R/usr/bin/steamos-session-select" "$STOCK/usr/bin/steamos-session-select"
 install_file "$OVL/usr/bin/steamos-session-select" \
   "$R/usr/bin/steamos-session-select" 0755
@@ -351,6 +358,7 @@ install_file "$OVL/usr/lib/steamos-arm/vpower" "$R/usr/lib/steamos-arm/vpower" 0
 # Keep the system's own drive and internal storage out of Steam's storage
 # settings (it offered to format the microSD card the system runs from).
 install_file "$OVL/usr/lib/steamos-arm/is-system-disk" "$R/usr/lib/steamos-arm/is-system-disk" 0755
+install_file "$OVL/usr/lib/steamos-arm/is-old-system-card" "$R/usr/lib/steamos-arm/is-old-system-card" 0755
 install_file "$OVL/usr/lib/udev/rules.d/98-steamos-arm-system-disk.rules" \
   "$R/usr/lib/udev/rules.d/98-steamos-arm-system-disk.rules" 0644
 # Wi-Fi back quickly after s2idle (one-channel scan, then retries).
@@ -383,6 +391,21 @@ install_file "$OVL/usr/share/polkit-1/rules.d/60-steamos-arm-update.rules" \
   "$R/usr/share/polkit-1/rules.d/60-steamos-arm-update.rules" 0644
 install_file "$OVL/usr/share/steamos-arm/update/signing.pub" \
   "$R/usr/share/steamos-arm/update/signing.pub" 0644
+# Settings > System names the installed release (set again on each boot,
+# since updates change it).
+install_file "$OVL/usr/lib/steamos-arm/os-release-version" "$R/usr/lib/steamos-arm/os-release-version" 0755
+install_file "$OVL/usr/lib/systemd/system/steamos-arm-os-release.service" \
+  "$R/usr/lib/systemd/system/steamos-arm-os-release.service" 0644
+ln -sfn ../steamos-arm-os-release.service \
+  "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-os-release.service"
+# Panel refresh calibration (RP6, Odin 3): the tool, and the unit that puts
+# the saved frame lengths back at boot.
+install_file "$OVL/usr/lib/steamos-arm/panel-calibrate" "$R/usr/lib/steamos-arm/panel-calibrate" 0755
+ln -sfn ../lib/steamos-arm/panel-calibrate "$R/usr/bin/steamos-arm-panel-calibrate"
+install_file "$OVL/usr/lib/systemd/system/steamos-arm-panel-calibration.service" \
+  "$R/usr/lib/systemd/system/steamos-arm-panel-calibration.service" 0644
+ln -sfn ../steamos-arm-panel-calibration.service \
+  "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-panel-calibration.service"
 # Store plugins that break on the Steam client we ship, fixed where Decky
 # installs them (SteamGridDB 1.7.1's footer glyph lookup for now).
 install_file "$OVL/usr/lib/steamos-arm/decky-plugin-fixes" "$R/usr/lib/steamos-arm/decky-plugin-fixes" 0755
@@ -563,6 +586,8 @@ install_file "$OVL/etc/profile.d/sm8550-gamepad.sh" \
   "$R/etc/profile.d/sm8550-gamepad.sh" 0644
 "${SCRIPT_DIR}/install-inputplumber-sm8550.sh" "$R"
 "${SCRIPT_DIR}/install-qcom-gyro-sm8550.sh" "$R"
+# Bluetooth and display settings pages for Desktop Mode (not in Valve's repos).
+"${SCRIPT_DIR}/install-kde-extras.sh" "$R"
 
 # ---------------------------------------------------------------------------
 # SM8650 device overlay: Pocket FIT pad (XInput → deck-uhid), APS2 UCM,
@@ -575,7 +600,8 @@ if [[ ! -f "$R/usr/lib/lv2/dpl.lv2/dpl.so" ]]; then
 fi
 cp -r --no-preserve=mode,ownership "$SM8650_OVL/." "$R/"
 chmod 0755 "$R/usr/lib/konkr/pocket-s2-controller"
-chmod 0644 "$R/usr/lib/liblsfg-vk-layer-arm64.so" "$R/usr/lib/liblsfg-vk-layer-arm64.so.README"
+chmod 0644 "$R/usr/lib/liblsfg-vk-layer-arm64.so" "$R/usr/lib/liblsfg-vk-layer-arm64.so.README" \
+  "$R/usr/lib/liblsfg-vk-classic-arm64.so" "$R/usr/lib/liblsfg-vk-classic-arm64.so.README"
 # Steam (Frame client) launches every game with
 # VK_INSTANCE_LAYERS=VK_LAYER_VALVE_rpo:VK_LAYER_VALVE_fdm_injection: the
 # headset's renderpass optimizer (rewrites shaders, tuned for the Frame's
@@ -658,6 +684,20 @@ ln -sfn ../konkr-sleep.service "$R/usr/lib/systemd/system/sleep.target.wants/kon
 rm -f "$R/usr/lib/systemd/system/multi-user.target.wants/sshd.service" \
   "$R/etc/systemd/system/multi-user.target.wants/sshd.service" \
   "$R/var/lib/overlays/etc/upper/systemd/system/multi-user.target.wants/sshd.service"
+# Discover: Flatpak apps only. Its PackageKit backend offered Valve's pacman
+# updates for the whole system, which replace this port's own packages (a
+# Legion Y700 Gen 4 tester's system stopped working after one), and its update
+# checks rewrite pacman's sync databases under /usr, which the updater then
+# finds changed ("this system differs", issue #64).
+rm -f "$R/usr/lib/qt6/plugins/discover/packagekit-backend.so"
+# Sleep evidence in the journal (sleep-stats): low-power state counts, wake IRQ.
+install -Dm0755 "$OVL/usr/lib/systemd/system-sleep/steamos-arm-sleep-stats" \
+  "$R/usr/lib/systemd/system-sleep/steamos-arm-sleep-stats"
+# Asleep or awake, power off before the battery runs flat: a sleeping
+# handheld at 0 % browns out and can boot-loop on the charger.
+install -Dm0755 "$OVL/usr/lib/systemd/system-sleep/steamos-arm-low-battery" "$R/usr/lib/systemd/system-sleep/steamos-arm-low-battery"
+sed -i -e 's/^PercentageCritical=.*/PercentageCritical=6/' -e 's/^PercentageAction=.*/PercentageAction=4/' \
+  -e 's/^CriticalPowerAction=.*/CriticalPowerAction=PowerOff/' "$R/etc/UPower/UPower.conf"
 # Discover: fetch the Flathub catalog (never downloaded on a fresh image).
 mkdir -p "$R/usr/lib/systemd/system/timers.target.wants"
 ln -sfn ../konkr-flatpak-appstream.timer \
@@ -823,11 +863,22 @@ for f in usr/lib/systemd/zram-generator.conf.d/60-steamos-arm-zram.conf \
 done
 IMG_OVL="${ROOT}/sm8550-image-overlay"
 mapfile -t _img_files < <(cd "$IMG_OVL" && find usr -type f)
-if [[ "${SOC:-sm8650}" == sm8550 ]]; then
+# The 865 image takes them too (same UFS, Frame CPU masks, mic loopback).
+if [[ "${SOC:-sm8650}" == sm8550 || "${SOC:-sm8650}" == sm8250 ]]; then
   log "== SM8550 image-only files (${#_img_files[@]})"
   for f in "${_img_files[@]}"; do install -D -m0644 "$IMG_OVL/$f" "$R/$f"; done
 else
   for f in "${_img_files[@]}"; do rm -f "$R/$f"; done
+fi
+# 865 (SM8250) handhelds: audio, controller and device files, only on that
+# image (and taken off a reused rootfs by the others).
+S8250_OVL="${ROOT}/sm8250-overlay"
+mapfile -t _s8250_files < <(cd "$S8250_OVL" && find etc usr -type f)
+if [[ "${SOC:-sm8650}" == sm8250 ]]; then
+  log "== SM8250 files (${#_s8250_files[@]})"
+  for f in "${_s8250_files[@]}"; do install -D -m0644 "$S8250_OVL/$f" "$R/$f"; done
+else
+  for f in "${_s8250_files[@]}"; do rm -f "$R/$f"; done
 fi
 # Log collector behind the BOOT "debug" file, also for kernels that don't
 # run our initramfs (it is the same script our initramfs installs).
@@ -892,6 +943,8 @@ for prefix in "$R/usr" "$R/usr/local"; do
     "$prefix/share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation_arm64.json"
 done
 [[ -r "$R/usr/lib/liblsfg-vk-layer-arm64.so" ]] || die "missing LSFG v2 ARM layer"
+# lsfg-vk 1.x next to it for the Frame Gen Classic plugin (see its README).
+[[ -r "$R/usr/lib/liblsfg-vk-classic-arm64.so" ]] || die "missing LSFG classic ARM layer"
 
 # ---------------------------------------------------------------------------
 # Mesa Turnip
@@ -926,10 +979,11 @@ if [[ -n "${MESA_STACK:-}" ]]; then
       || die "MESA_STACK has no $a build"
   done
   ANDROID_VENDOR="usr/share/guestos/android/vendor/lib64"
-  [[ -f "$MESA_STACK/android/$ANDROID_VENDOR/hw/vulkan.freedreno.so" ]] \
-    || die "MESA_STACK has no android build (Lepton)"
   PDB="$R/usr/lib/holo/pacmandb/local"
-  for pkg in deckard-mesa-linux-aarch64 deckard-mesa-linux-x86_64 deckard-mesa-android-aarch64; do
+  # Android (Lepton) keeps Valve's own Mesa: with ours its display service
+  # (surfaceflinger) crashed as it started and Android never came up on 1.3,
+  # where 1.2 ran it on Valve's. Only the Linux side gets our Mesa.
+  for pkg in deckard-mesa-linux-aarch64 deckard-mesa-linux-x86_64; do
     list="$(ls -d "$PDB/${pkg}"-[0-9]*/files 2>/dev/null | head -1)"
     [[ -n "$list" ]] || continue
     grep -v -e '^%' -e '/$' "$list" | grep -E '(\.so[.0-9]*|\.json)$' \
@@ -948,10 +1002,10 @@ if [[ -n "${MESA_STACK:-}" ]]; then
   cp -a "$MESA_STACK/x86_64/usr/share/." "$GUEST/usr/share/"
   cp -a "$MESA_STACK/i386/usr/lib32/." "$GUEST/usr/lib32/"
   cp -a "$MESA_STACK/i386/usr/share/vulkan/." "$GUEST/usr/share/vulkan/"
-  # Lepton (Android apps): same files and names as Valve's Android Mesa.
-  mkdir -p "$R/$ANDROID_VENDOR"
-  cp -a "$MESA_STACK/android/$ANDROID_VENDOR/." "$R/$ANDROID_VENDOR/"
-  chown -R root:root "$R/$ANDROID_VENDOR"
+  # Earlier images put our Android Mesa over Valve's: put Valve's back.
+  if [[ -d "$STOCK/$ANDROID_VENDOR" ]]; then
+    cp -a "$STOCK/$ANDROID_VENDOR/." "$R/$ANDROID_VENDOR/"
+  fi
   chown -R root:root "$R/usr/lib/dri" "$GUEST/usr/lib/dri" "$GUEST/usr/lib32/dri"
   # mangoapp runs on the system Turnip (it matches our zink), no pin.
   rm -rf "$R/usr/lib/steamos-sm8650/frame-turnip" \
@@ -966,7 +1020,7 @@ if [[ -n "${MESA_STACK:-}" ]]; then
     >"$R/usr/lib/environment.d/60-sm8550-zink.conf"
   chmod 0644 "$R/usr/lib/environment.d/60-sm8550-zink.conf"
   for f in "$R/usr/lib/libgallium-"*.so "$GUEST/usr/lib/libgallium-"*.so \
-           "$GUEST/usr/lib32/libgallium-"*.so "$R/$ANDROID_VENDOR/libgallium_dri.so"; do
+           "$GUEST/usr/lib32/libgallium-"*.so; do
     log "   ${f#$R}: $(grep -a -o -m1 'Mesa [0-9][0-9.]*' "$f" || echo '?')"
   done
 elif [[ -n "$MESA_SO" ]]; then
@@ -995,6 +1049,12 @@ mkdir -p "$HOME_DST"
 # .local/lib/liblsfg-vk.so is a link to the SM8550 builder's host library;
 # skip it (decky-lsfg-vk installs its own copy).
 rsync -a --copy-links --exclude '.local/lib/liblsfg-vk.so' "${MOD}/Decky/Plug-ins/" "$HOME_DST/"
+# Frame Gen Classic (lsfg-vk 1.x) also goes in the system: updates can't
+# carry a new home plugin folder, so decky-plugin-fixes installs it from here.
+mkdir -p "$R/usr/share/steamos-arm/decky-plugins"
+rm -rf "$R/usr/share/steamos-arm/decky-plugins/decky-lsfg-vk-classic"
+cp -r --no-preserve=ownership "${MOD}/Decky/Plug-ins/homebrew/plugins/decky-lsfg-vk-classic" \
+  "$R/usr/share/steamos-arm/decky-plugins/"
 # Decky itself. Upstream left it to a first-boot installer in ARM-Manager
 # that most people never found — no Decky, so no KONKR Control either.
 # v3.2.9's bundled Python is missing http.server, socketserver and
@@ -1206,5 +1266,6 @@ log "== summary"
 # know what they're changing and Steam knows what's current.
 python3 "$ROOT/external-and-mods/konkr-update/konkr-update.py" record-inventory --root "$R" \
   --version "${STEAMOS_ARM_VERSION:-1.3.0}" --soc "${SOC:-sm8650}" | tee -a "$LOG"
+python3 "$OVL/usr/lib/steamos-arm/os-release-version" "$R" | tee -a "$LOG"
 
 log "OK"

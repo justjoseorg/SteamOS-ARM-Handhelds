@@ -26,6 +26,8 @@ debug=0
 usbshell=0
 usbimage=0
 steamosroot=""
+bootlabel=ROCKNIX
+session=""
 for arg in $(cat /proc/cmdline); do
   case "$arg" in
     konkr.bootlog_wait=*) extra="${arg#*=}" ;;
@@ -33,6 +35,11 @@ for arg in $(cat /proc/cmdline); do
     steamos.usbshell=1) usbshell=1 ;;
     steamos.usbimage=1) usbimage=1 ;;
     steamos.root=*) steamosroot="${arg#steamos.root=}" ;;
+    # Debug boot images: log straight into Desktop Mode for this boot.
+    steamos.session=plasma) session=plasma ;;
+    # The FAT partition with the boot files, logs and the debug switch: ROCKNIX
+    # on internal handheld installs, super on the Lenovo tablets.
+    steamos.bootlabel=*) bootlabel="${arg#steamos.bootlabel=}" ;;
     root=*) rootarg="${arg#root=}" ;;
   esac
 done
@@ -122,7 +129,16 @@ case "$rootarg" in
       fi
       sleep 0.5
     done
-    [ -n "$bootdev" ] || bootdev="$(by_partlabel ROCKNIX)"
+    [ -n "$bootdev" ] || bootdev="$(by_partlabel "$bootlabel")"
+    ;;
+  /dev/*)
+    # A device by name: the Legion Y700 Gen 4's microSD dual boot uses
+    # root=/dev/mmcblk0, the system written to the whole card.
+    for i in $(seq 1 60); do
+      [ -b "$rootarg" ] && rootdev="$rootarg" && break
+      sleep 0.5
+    done
+    bootdev="$(by_partlabel "$bootlabel")"
     ;;
   *)
     for i in $(seq 1 60); do
@@ -148,7 +164,10 @@ snap() {
   sync
 }
 
-if [ -n "$bootdev" ] && mount -t vfat "$bootdev" /boot; then
+# A 512-byte-sector FAT on a 4K-sector disk (the Lenovo Gen 3's super on UFS)
+# only mounts through a loop device, which has 512-byte sectors.
+if [ -n "$bootdev" ] && { mount -t vfat "$bootdev" /boot 2>/dev/null ||
+     mount -t vfat -o loop "$bootdev" /boot; }; then
   logdir=/boot
   [ -e /boot/debug ] || [ -e /boot/debug.txt ] && debug=1
   n=0
@@ -177,6 +196,29 @@ if [ -n "$rootdev" ] && mount -t ext4 -o rw "$rootdev" /newroot; then
     mount -t overlay overlay \
       -o "lowerdir=/newroot/etc,upperdir=$o/upper,workdir=$o/work" /newroot/etc ||
       echo "etc overlay failed, leaving it to etc.mount"
+  fi
+  # Desktop Mode for this boot only (steamos.session=plasma): a file that
+  # sorts after SteamOS's own autologin, removed again on any other boot.
+  f=/newroot/etc/sddm.conf.d/zzz-steamos-arm-session.conf
+  if [ "$session" = plasma ]; then
+    mkdir -p "${f%/*}" && printf '[Autologin]\nSession=plasma.desktop\n' > "$f"
+  else
+    rm -f "$f"
+  fi
+  # Test builds can carry fixed root files (/hotfix). They are bind-mounted
+  # over the installed ones on boots from this image only, so the root stays
+  # as released and updates still apply to it. New files can only go to /etc.
+  if [ -d /hotfix ]; then
+    h=/newroot/var/lib/steamos-arm/hotfix
+    rm -rf "$h" && mkdir -p "$h" && cp -a /hotfix/. "$h/"
+    (cd "$h" && find . -type f) | while read -r p; do
+      p=${p#./}
+      if [ -f "/newroot/$p" ]; then
+        mount -o bind "$h/$p" "/newroot/$p" && snap "hotfix $p"
+      elif [ "${p%%/*}" = etc ]; then
+        mkdir -p "/newroot/${p%/*}" && cp -a "$h/$p" "/newroot/$p" && snap "hotfix new $p"
+      fi
+    done
   fi
   if [ "$debug" = 1 ]; then
     # Log collector (see bootdebug), only for this boot's root.

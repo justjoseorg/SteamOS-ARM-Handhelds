@@ -21,6 +21,27 @@ ODIN3D = os.path.exists("/usr/lib/odin3/odin3d")
 STATE = "/var/lib/odin3/state.json" if ODIN3D else "/var/lib/konkrd/state.json"
 DAEMON = "odin3d" if ODIN3D else "konkrd"
 BLACKLIST = "/etc/modprobe.d/konkr-mcu.conf"
+FLIP = "/etc/steamos-arm/flip-screen"
+
+
+def gen5() -> bool:
+    """Lenovo Legion Y700 Gen 5 (its bootloader can't be unlocked: Android and
+    SteamOS take turns in boot_a)."""
+    try:
+        with open("/sys/firmware/devicetree/base/compatible", "rb") as fh:
+            return "lenovo,baldur" in fh.read().decode(errors="replace").split("\0")
+    except OSError:
+        return False
+
+
+def tablet() -> bool:
+    """Lenovo Legion Y700 Gen 3 / Gen 4."""
+    try:
+        with open("/sys/firmware/devicetree/base/compatible", "rb") as fh:
+            compat = fh.read().decode(errors="replace").split("\0")
+    except OSError:
+        return False
+    return any(c in compat for c in ("lenovo,tb321fu", "lenovo,elden", "lenovo,baldur"))
 PROFILES = ("silent", "balanced", "turbo")
 ACTIONS = ("profile-next", "rgb-next", "sticks-toggle", "fan-boost", "game", "none")
 
@@ -169,6 +190,17 @@ class Plugin:
             "game": game_fan_state(st),
             "power_led": st["power_led"],
             "menu_clicks": st["menu_clicks"],
+            "has_flip": tablet(),
+            "flip": os.path.exists(FLIP),
+            # Tablets: SteamOS on the microSD card next to Android. Handhelds:
+            # ROCKNIX ABL, whose menu picks Android or Linux.
+            "has_dualboot": not tablet() or subprocess.run(["sh", "-c", "findmnt -no SOURCE / | grep -q mmcblk"]).returncode == 0,
+            "dualboot_label": ("Restart into ZUI" if gen5() else "Restart into ZUXOS") if tablet() else "Restart into Android",
+            "dualboot_text": ("SteamOS runs from the microSD card. This restarts into "
+                              + ("ZUI; to come back, use Switch to SteamOS in KernelSU" if gen5()
+                                 else "ZUXOS; to come back, run fastboot set_active b")) if tablet() else
+                             ("Restarts into the boot menu: choose Switch boot mode until it says Android, "
+                              "then Start. To come back, restart holding Volume Down and switch it back to Linux."),
             "has_motors": any("HID_ID=0003:00004001:00000428" in rd(f"{d}/device/uevent")
                               for d in glob.glob("/sys/class/hidraw/hidraw*")),
             "buttons": st["buttons"],
@@ -255,6 +287,30 @@ class Plugin:
         st["menu_clicks"] = bool(on)
         save(st)
         return st["menu_clicks"]
+
+    async def set_flip(self, on: bool = False, **_: Any) -> bool:
+        """Lenovo tablets: Game Mode the other way up. gamescope reads it when
+        Game Mode starts; the touch mapping follows through udev now."""
+        if on:
+            os.makedirs(os.path.dirname(FLIP), exist_ok=True)
+            open(FLIP, "w").close()
+        elif os.path.exists(FLIP):
+            os.remove(FLIP)
+        await asyncio.to_thread(subprocess.run, ["udevadm", "trigger", "--subsystem-match=input", "--action=change"])
+        return os.path.exists(FLIP)
+
+    async def boot_android(self, **_: Any) -> bool:
+        """Restart into Android: tablets switch back to their Android (ZUXOS or
+        ZUI), handhelds restart into the ABL's boot menu."""
+        # Gen 5: copy Android's boot image back into boot_a. Gen 4: make slot A active.
+        # Handhelds: restart into ROCKNIX ABL's menu (its boot mode lives in a
+        # UEFI variable Linux can't set).
+        if not tablet():
+            tool = ["systemctl", "reboot", "--reboot-argument=bootloader"]
+        else:
+            tool = ["/usr/lib/steamos-arm/gen5-android"] if gen5() else ["/usr/lib/steamos-arm/tablet-slot", "android"]
+        r = await asyncio.to_thread(subprocess.run, tool)
+        return r.returncode == 0
 
     async def set_power_led(self, on: bool = True, **_: Any) -> bool:
         st = load()

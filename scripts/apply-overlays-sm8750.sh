@@ -93,6 +93,13 @@ ONLY_UFS=1 STEAMOS_HOME="$R/home/steamos" "${ROOT}/scripts/install-vendor-apps.s
 
 # Merge SM8750 firmware
 cp -a "$KOUT/firmware/." "$R/usr/lib/firmware/"
+# The Odin 3's audio topology with DisplayPort (external-and-mods/audio-topology;
+# the Pocket FIT Elite's from ROCKNIX already has it).
+install_file "${ROOT}/external-and-mods/audio-topology/sm8750/SM8750-AYN-tplg.bin" \
+  "$R/usr/lib/firmware/qcom/sm8750/SM8750-AYN-tplg.bin" 0644
+
+# Bluetooth and display settings pages for Desktop Mode (not in Valve's repos).
+"${SCRIPT_DIR}/install-kde-extras.sh" "$R"
 
 # ---------------------------------------------------------------------------
 # 2. Gamescope (SM8750 aarch64 build)
@@ -170,6 +177,13 @@ install_file "$OVL/usr/lib/steamos/sm8550-prepare-plasma" \
   "$R/usr/lib/steamos/sm8550-prepare-plasma" 0755
 install_file "$OVL/usr/lib/steamos/sm8550-startplasma" \
   "$R/usr/lib/steamos/sm8550-startplasma" 0755
+# Desktop Mode's Steam autostart through desktop-steam: Steam's on-screen
+# keyboard fits narrow panels (AYANEO Pocket DMG).
+install_file "$OVL/usr/lib/steamos/desktop-steam" "$R/usr/lib/steamos/desktop-steam" 0755
+if [[ -f "$R/etc/xdg/autostart/steam.desktop" ]]; then
+  sed -i 's|^Exec=/usr/bin/steam |Exec=/usr/lib/steamos/desktop-steam |' "$R/etc/xdg/autostart/steam.desktop"
+  grep -q '^Exec=/usr/lib/steamos/desktop-steam ' "$R/etc/xdg/autostart/steam.desktop" || die "Steam autostart not redirected"
+fi
 backup "$R/usr/bin/steamos-session-select" "$STOCK/usr/bin/steamos-session-select"
 install_file "$OVL/usr/bin/steamos-session-select" \
   "$R/usr/bin/steamos-session-select" 0755
@@ -226,8 +240,14 @@ for svc in \
   adbd-post.service usb-gadget.target usb-gadget.service \
   usb-gadget-init.service 'usb-ncm-gadget@.service' \
   'usb-ncm-dnsmasq@.service' 'usb-ncm-gadget@usb0.service' \
-  'usb-ncm-dnsmasq@usb0.service'
+  'usb-ncm-dnsmasq@usb0.service' \
+  steamos-boot.service efi.mount esp.mount systemd-repart.service
 do
+  # The last four, as on the other chips (apply-overlays.sh): steamos-boot
+  # needs efi.mount, which waits 90 s for the Deck's EFI partition
+  # (by-partsets/self/efi), and systemd-repart adds a home partition in the
+  # card's free space at boot, which then leaves nothing for
+  # steamos-sm8550-expand-home to grow into.
   rm -f "$R/etc/systemd/system/multi-user.target.wants/${svc}" \
         "$R/etc/systemd/system/default.target.wants/${svc}" \
         "$R/etc/systemd/user/default.target.wants/${svc}" 2>/dev/null || true
@@ -499,6 +519,9 @@ cat <<'UNIT' >"$R/etc/systemd/system/sm8750-audio-setup.service"
 [Unit]
 Description=AYN Odin 3 Audio Setup
 After=sound.target
+# Its card match (SM8750) also takes the Legion Y700 Gen 4's card, which has
+# its own profile and no Odin 3 routes.
+ConditionFirmware=!device-tree-compatible(lenovo,elden)
 
 [Service]
 Type=oneshot
@@ -592,9 +615,22 @@ install_file "${ROOT}/sm8650-overlay/usr/lib/liblsfg-vk-layer-arm64.so" "$R/usr/
 install_file "${ROOT}/sm8650-overlay/usr/lib/liblsfg-vk-layer-arm64.so.README" "$R/usr/lib/liblsfg-vk-layer-arm64.so.README" 0644
 install_file "${ROOT}/sm8650-overlay/usr/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation_arm64.json" \
   "$R/usr/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation_arm64.json" 0644
+# lsfg-vk 1.x next to it for the Frame Gen Classic plugin (see its README).
+for f in liblsfg-vk-classic-arm64.so liblsfg-vk-classic-arm64.so.README; do
+  install_file "${ROOT}/sm8650-overlay/usr/lib/$f" "$R/usr/lib/$f" 0644
+done
+install_file "${ROOT}/sm8650-overlay/usr/share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation_classic_arm64.json" \
+  "$R/usr/share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation_classic_arm64.json" 0644
 mkdir -p "$R/usr/share/licenses"
-cp -r --no-preserve=mode,ownership "${ROOT}/sm8650-overlay/usr/share/licenses/lsfg-vk" "$R/usr/share/licenses/"
+cp -r --no-preserve=mode,ownership "${ROOT}/sm8650-overlay/usr/share/licenses/lsfg-vk" \
+  "${ROOT}/sm8650-overlay/usr/share/licenses/lsfg-vk-classic" "$R/usr/share/licenses/"
 rsync -a --copy-links --exclude '.local/lib/liblsfg-vk.so' "${MOD}/Decky/Plug-ins/" "$HOME_DST/"
+# Frame Gen Classic (lsfg-vk 1.x) also goes in the system: updates can't
+# carry a new home plugin folder, so decky-plugin-fixes installs it from here.
+mkdir -p "$R/usr/share/steamos-arm/decky-plugins"
+rm -rf "$R/usr/share/steamos-arm/decky-plugins/decky-lsfg-vk-classic"
+cp -r --no-preserve=ownership "${MOD}/Decky/Plug-ins/homebrew/plugins/decky-lsfg-vk-classic" \
+  "$R/usr/share/steamos-arm/decky-plugins/"
 rm -f "$HOME_DST/.local/lib/liblsfg-vk.so" \
   "$HOME_DST/.local/share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json"
 [[ -f "$HOME_DST/.config/lsfg-vk/conf.toml" ]] && sed -i 's|/home/steam/|/home/steamos/|g' "$HOME_DST/.config/lsfg-vk/conf.toml"
@@ -602,7 +638,8 @@ rm -f "$HOME_DST/.local/lib/liblsfg-vk.so" \
 # hold up shutdown.
 install_file "$OVL/usr/share/steamos-odin/plugin_loader.service.d/fast-stop.conf" \
   "$R/usr/lib/systemd/system/plugin_loader.service.d/fast-stop.conf" 0644
-[[ -r "$R/usr/lib/liblsfg-vk-layer-arm64.so" && -f "$HOME_DST/homebrew/plugins/decky-lsfg-vk/plugin.json" ]] \
+[[ -r "$R/usr/lib/liblsfg-vk-layer-arm64.so" && -f "$HOME_DST/homebrew/plugins/decky-lsfg-vk/plugin.json" \
+   && -r "$R/usr/lib/liblsfg-vk-classic-arm64.so" && -f "$HOME_DST/homebrew/plugins/decky-lsfg-vk-classic/plugin.json" ]] \
   || die "lsfg-vk missing from the 8 Elite image"
 chown -R 1000:1000 "$HOME_DST/homebrew"
 # Loadout: emulators, PC game stores and apps (engine + Decky plugin).
@@ -615,6 +652,7 @@ install_file "$OVL/usr/lib/steamos-arm/vpower" "$R/usr/lib/steamos-arm/vpower" 0
 # Keep the system's own drive and internal storage out of Steam's storage
 # settings (it offered to format the microSD card the system runs from).
 install_file "$OVL/usr/lib/steamos-arm/is-system-disk" "$R/usr/lib/steamos-arm/is-system-disk" 0755
+install_file "$OVL/usr/lib/steamos-arm/is-old-system-card" "$R/usr/lib/steamos-arm/is-old-system-card" 0755
 install_file "$OVL/usr/lib/udev/rules.d/98-steamos-arm-system-disk.rules" \
   "$R/usr/lib/udev/rules.d/98-steamos-arm-system-disk.rules" 0644
 # Wi-Fi back quickly after s2idle (one-channel scan, then retries).
@@ -651,6 +689,21 @@ install_file "$OVL/usr/share/polkit-1/rules.d/60-steamos-arm-update.rules" \
   "$R/usr/share/polkit-1/rules.d/60-steamos-arm-update.rules" 0644
 install_file "$OVL/usr/share/steamos-arm/update/signing.pub" \
   "$R/usr/share/steamos-arm/update/signing.pub" 0644
+# Settings > System names the installed release (set again on each boot,
+# since updates change it).
+install_file "$OVL/usr/lib/steamos-arm/os-release-version" "$R/usr/lib/steamos-arm/os-release-version" 0755
+install_file "$OVL/usr/lib/systemd/system/steamos-arm-os-release.service" \
+  "$R/usr/lib/systemd/system/steamos-arm-os-release.service" 0644
+ln -sfn ../steamos-arm-os-release.service \
+  "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-os-release.service"
+# Panel refresh calibration (RP6, Odin 3): the tool, and the unit that puts
+# the saved frame lengths back at boot.
+install_file "$OVL/usr/lib/steamos-arm/panel-calibrate" "$R/usr/lib/steamos-arm/panel-calibrate" 0755
+ln -sfn ../lib/steamos-arm/panel-calibrate "$R/usr/bin/steamos-arm-panel-calibrate"
+install_file "$OVL/usr/lib/systemd/system/steamos-arm-panel-calibration.service" \
+  "$R/usr/lib/systemd/system/steamos-arm-panel-calibration.service" 0644
+ln -sfn ../steamos-arm-panel-calibration.service \
+  "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-panel-calibration.service"
 # The updater itself (the other images get it with the vendor apps).
 install -d -m0755 "$R/usr/share/konkr-update"
 install -m0644 "$ROOT/external-and-mods/konkr-update/konkr-update.py" "$R/usr/share/konkr-update/konkr-update.py"
@@ -782,6 +835,30 @@ done
 bad="$(find "$R/usr/share/gamescope" "$R/etc/gamescope" -xdev -type f ! -perm -o=r 2>/dev/null | head -3)"
 [[ -z "$bad" ]] || die "gamescope scripts not readable: $bad"
 
+# The Frame's systemd confs keep the session on cpu0-4 and system services on
+# cpu1-4: on the 8 Elite that hides three of its eight cores from Steam, games
+# and FEX ("Available Logical CPU Cores: 5", issue #63). Same unpinning as the
+# 8 Gen 2 image.
+for f in usr/lib/systemd/user.conf.d/60-sm8550-cpu-affinity.conf \
+         usr/lib/systemd/system.conf.d/60-sm8550-cpu-affinity.conf \
+         usr/lib/systemd/user/steam.service.d/70-sm8550-cpu-affinity.conf; do
+  install -Dm0644 "$ROOT/sm8550-image-overlay/$f" "$R/$f"
+done
+# Discover: Flatpak apps only. Its PackageKit backend offered Valve's pacman
+# updates for the whole system, which replace this port's own packages (a
+# Legion Y700 Gen 4 tester's system stopped working after one), and its update
+# checks rewrite pacman's sync databases under /usr, which the updater then
+# finds changed ("this system differs", issue #64).
+rm -f "$R/usr/lib/qt6/plugins/discover/packagekit-backend.so"
+# Sleep evidence in the journal (sleep-stats): low-power state counts, wake IRQ.
+install -Dm0755 "$OVL/usr/lib/systemd/system-sleep/steamos-arm-sleep-stats" \
+  "$R/usr/lib/systemd/system-sleep/steamos-arm-sleep-stats"
+# Asleep or awake, power off before the battery runs flat: a sleeping
+# handheld at 0 % browns out and can boot-loop on the charger.
+install -Dm0755 "$OVL/usr/lib/systemd/system-sleep/steamos-arm-low-battery" "$R/usr/lib/systemd/system-sleep/steamos-arm-low-battery"
+sed -i -e 's/^PercentageCritical=.*/PercentageCritical=6/' -e 's/^PercentageAction=.*/PercentageAction=4/' \
+  -e 's/^CriticalPowerAction=.*/CriticalPowerAction=PowerOff/' "$R/etc/UPower/UPower.conf"
+
 # macOS AppleDouble files (._name) from copying the tree through a Mac.
 # gamescope runs every .lua in its script folders, and ._inspect.lua made it
 # abort on start, over and over: the Odin 3 test 1/2 black screen.
@@ -791,5 +868,6 @@ find "$R" -xdev -name '._*' -type f -delete 2>/dev/null || true
 # Last: what this image installed, and which release it is (see apply-overlays.sh).
 python3 "$ROOT/external-and-mods/konkr-update/konkr-update.py" record-inventory --root "$R" \
   --version "${STEAMOS_ARM_VERSION:-1.3.0}" --soc sm8750 | tee -a "$LOG"
+python3 "$OVL/usr/lib/steamos-arm/os-release-version" "$R" | tee -a "$LOG"
 
 log "== SM8750 overlays successfully applied"
