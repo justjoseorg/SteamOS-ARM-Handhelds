@@ -138,11 +138,19 @@ jobs:
           ref: ${{ github.sha }}
       - name: Build
         run: INSIDE=1 OUT="$GITHUB_WORKSPACE/out" bash external-and-mods/v4l2-vaapi/build.sh
-      - name: Check AV1 references
+      - name: Check decoder and surface formats
+        shell: bash
         run: |
           gcc -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
             external-and-mods/v4l2-vaapi/tests/av1.c -o /tmp/test-av1
           /tmp/test-av1
+          gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
+            external-and-mods/v4l2-vaapi/tests/formats.c \
+            external-and-mods/v4l2-vaapi/src/{av1,dec,h264}.c -lpthread -o /tmp/test-formats
+          /tmp/test-formats
+          gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
+            external-and-mods/v4l2-vaapi/tests/gbm.c -ldl -lpthread -o /tmp/test-gbm
+          /tmp/test-gbm
       - name: Check update installation
         run: python3 scripts/test-av1-update.py
       - name: Package
