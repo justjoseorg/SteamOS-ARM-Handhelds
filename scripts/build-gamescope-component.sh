@@ -31,7 +31,7 @@ dependency libdrm https://gitlab.freedesktop.org/mesa/drm.git \
 dependency libxkbcommon https://github.com/xkbcommon/libxkbcommon.git \
     b3465081878e80ca6c11fe35c81787ec374ec15a xkbcommon
 dependency pixman https://gitlab.freedesktop.org/pixman/pixman.git \
-    54cad71674ec485cbbbf49876feaa8a69b97c828 pixman-1
+    9cc163c9da0fb4da430641715313d95a6ec466d9 pixman-1
 
 luajit "$WORK/src/tests/ayn.odin2.portal.lua" \
     "$WORK/src/scripts/00-gamescope/displays/ayn.odin2.portal.lua"
