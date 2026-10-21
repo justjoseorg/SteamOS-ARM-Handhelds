@@ -1498,7 +1498,11 @@ static bool setup_best_connector(struct drm_t *drm, bool force, bool initial)
 	s_ExternalBroadcastRGBMode = GAMESCOPE_BROADCAST_RGB_MODE_AUTOMATIC;
 
 	const drmModeModeInfo *mode = nullptr;
-	if ( drm->preferred_width != 0 || drm->preferred_height != 0 || drm->preferred_refresh != 0 )
+	// The session's --output-width/height come from the built-in panel. A
+	// monitor gets its saved or own preferred mode instead: a 1920x1200
+	// screen stayed at 1920x1080 from a 1080p handheld (#49).
+	if ( ( drm->preferred_width != 0 || drm->preferred_height != 0 || drm->preferred_refresh != 0 ) &&
+	     best->GetScreenType() != gamescope::GAMESCOPE_SCREEN_TYPE_EXTERNAL )
 	{
 		mode = find_mode(best->GetModeConnector(), drm->preferred_width, drm->preferred_height, gamescope::ConvertmHzToHz( drm->preferred_refresh ));
 	}

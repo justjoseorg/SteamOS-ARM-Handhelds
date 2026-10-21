@@ -88,6 +88,18 @@ mapping:
       gamepad:
         button: QuickAccess
 
+  # The board's power-key-block resin button (pm8941_resin, reported as
+  # KEY_VOLUMEDOWN) is a second Quick Access button.
+  - name: Quick Access (resin button)
+    source_events:
+      - evdev:
+          event_type: KEY
+          event_code: KEY_VOLUMEDOWN
+          value_type: button
+    target_event:
+      gamepad:
+        button: QuickAccess
+
   - name: Left Bumper
     source_events:
       - evdev:

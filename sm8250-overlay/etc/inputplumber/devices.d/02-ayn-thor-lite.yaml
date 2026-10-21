@@ -23,7 +23,8 @@ source_devices:
   - group: gamepad
     evdev:
       name: gpio-keys-ayn
-      phys_path: gpio-keys-ayn/input0
+      # no phys_path: the gpio-keys driver names every instance "gpio-keys/input0",
+      # so the old "gpio-keys-ayn/input0" never matched and the key was never mapped
       handler: event*
     capability_map_id: retroid_865
 

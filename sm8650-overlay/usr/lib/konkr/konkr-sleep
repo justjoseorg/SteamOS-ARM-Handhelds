@@ -179,6 +179,43 @@ xhci_on() {
   rm -f "$XHCI_STATE"
 }
 
+# The controller MCU runs from the fan's 5 V supply, which the kernel cuts
+# for the sleep (patch 0065). Kernels before its resume fix only gave it back
+# when the fan spun up, so after a sleep with the fan stopped the pad and the
+# MCU stayed dead (2026-10-17). Switching pwm-fan's enable mode to 2 and back
+# turns the supply on without spinning the fan. The MCU then boots without
+# the enable frame its driver sent at resume; sysbtn_rebind sends it.
+fan_supply_on() {
+  local h r off=
+  for r in /sys/class/regulator/*; do
+    [[ $(<"$r/name") == fan_pwr && $(<"$r/state") == disabled ]] && off=1
+  done 2>/dev/null
+  [[ -n $off ]] || return 0
+  for h in /sys/class/hwmon/hwmon*; do
+    [[ -r $h/pwm1_enable && $(<"$h/name") == pwmfan ]] || continue
+    [[ $(<"$h/pwm1_enable") == 1 ]] || continue
+    echo 2 >"$h/pwm1_enable" && echo 1 >"$h/pwm1_enable"
+  done
+  sleep 0.7   # MCU boot
+  log "post: fan supply was off, powered the controller MCU back on"
+}
+
+# Rebind konkr_sysbtn on every wake, before the USB pad comes back. It
+# resends the enable frame, and its input node going away makes InputPlumber
+# drop the composite device that held the old USB pad. Left alone, InputPlumber adds the new pad to that old composite and
+# Steam's virtual pad stays dead: haptics work, the UI ignores it
+# (2026-10-18). Rebuilt from the system buttons, the composite is up before
+# the pad and the pad joins it within a second. Restarting InputPlumber
+# instead also worked, but took ~5 s.
+sysbtn_rebind() {
+  local h
+  for h in /sys/bus/serial/drivers/konkr_sysbtn/serial*; do
+    [[ -e $h ]] || continue
+    echo "${h##*/}" >/sys/bus/serial/drivers/konkr_sysbtn/unbind
+    echo "${h##*/}" >/sys/bus/serial/drivers/konkr_sysbtn/bind
+  done
+}
+
 # 8 Gen 3 on our 7.2 kernel: the kernel itself handles Wi-Fi, audio graphs,
 # touch and the PMIC wake sources across s2idle (Armada's suspend series).
 # Unloading ath12k and unbinding touch on top of that hung the Pocket FIT on
@@ -252,6 +289,8 @@ touch_on() {
 post() {
   report_end
   ufs_on
+  fan_supply_on
+  sysbtn_rebind
   xhci_on
   wifi_watch_start
   if light; then

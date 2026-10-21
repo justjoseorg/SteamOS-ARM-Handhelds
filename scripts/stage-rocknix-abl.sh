@@ -37,10 +37,10 @@ elf=$(find "$tmp" -name "abl_signed-$soc.elf" | head -1)
 [[ -f $elf ]] || die "abl_signed-$soc.elf not in the release"
 [[ "$(sha256sum "$elf" | cut -d' ' -f1)" == "$want" ]] || die "abl_signed-$soc.elf hash mismatch"
 
-# Flat, like ROCKNIX's own image. The scripts find the folder in /sdcard or on
-# the card (/storage/*/rocknix_abl) themselves: Android's "run script as root"
-# tools run them with a bare shell ($0, id and getprop checks failed there),
-# and some run a file one line at a time, so every line stands on its own.
+# Flat, like ROCKNIX's own image. The scripts are plain dd lines with the
+# literal /sdcard/rocknix_abl path, the same as ROCKNIX/OpenABL ship: the
+# vendor "run script as root" tools (AYN's at least) run them line by line,
+# show no output, and loops, tests and $(...) there wrote nothing (#69).
 out=$BOOT/rocknix_abl
 rm -rf "$out"
 mkdir -p "$out"

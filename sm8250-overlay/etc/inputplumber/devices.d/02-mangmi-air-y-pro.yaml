@@ -22,6 +22,12 @@ source_devices:
     capability_map_id: mangmi_air_y_pro_865
   - group: gamepad
     evdev:
+      name: pm8941_resin
+      phys_path: pm8941_resin/input0
+      handler: event*
+    capability_map_id: mangmi_air_y_pro_865
+  - group: gamepad
+    evdev:
       name: pwm-vibrator
       handler: event*
 
