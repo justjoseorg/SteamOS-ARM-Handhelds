@@ -12,6 +12,8 @@ on:
         value: ${{ jobs.plan.outputs.kernel_name }}
       ip_name:
         value: ${{ jobs.plan.outputs.ip_name }}
+      va_name:
+        value: ${{ jobs.plan.outputs.va_name }}
   workflow_dispatch:
   push:
     branches: [main]
@@ -20,6 +22,7 @@ on:
       - external-and-mods/kernel-common/**
       - external-and-mods/InputPlumber/**.patch
       - scripts/build-inputplumber-konkr.sh
+      - external-and-mods/v4l2-vaapi/**
       - .github/workflows/fork-components.yml
 
 permissions:
@@ -34,22 +37,27 @@ jobs:
     outputs:
       kernel_name: ${{ steps.p.outputs.kernel_name }}
       ip_name: ${{ steps.p.outputs.ip_name }}
+      va_name: ${{ steps.p.outputs.va_name }}
       kernel: ${{ steps.p.outputs.kernel }}
       ip: ${{ steps.p.outputs.ip }}
+      va: ${{ steps.p.outputs.va }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
       - id: p
         run: |
           h() { git ls-files -z "$@" | xargs -0 sha256sum | sha256sum | cut -c1-12; }
           k=$(h external-and-mods/kernel-sm8550 external-and-mods/kernel-common)
           i=$(h external-and-mods/InputPlumber/0001-bound-ayaneo-haptics-polling.patch external-and-mods/InputPlumber/0002-ayaneo-haptics-timed-rumble-and-steam-pulses.patch external-and-mods/InputPlumber/0003-manage-ayn-odin2-imu-uhid.patch external-and-mods/InputPlumber/0004-pmic-haptics-rumble-as-flat-constant.patch scripts/build-inputplumber-konkr.sh)
+          v=$(h external-and-mods/v4l2-vaapi)
           echo "kernel_name=kernel-sm8550-$k.tar.gz" >> "$GITHUB_OUTPUT"
           echo "ip_name=inputplumber-$i" >> "$GITHUB_OUTPUT"
+          echo "va_name=v4l2-vaapi-arm64-$v.tar.gz" >> "$GITHUB_OUTPUT"
           have=$(gh release view fork-assets -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
           grep -qx "kernel-sm8550-$k.tar.gz" <<<"$have" && echo "kernel=false" >> "$GITHUB_OUTPUT" || echo "kernel=true" >> "$GITHUB_OUTPUT"
           grep -qx "inputplumber-$i" <<<"$have" && echo "ip=false" >> "$GITHUB_OUTPUT" || echo "ip=true" >> "$GITHUB_OUTPUT"
+          grep -qx "v4l2-vaapi-arm64-$v.tar.gz" <<<"$have" && echo "va=false" >> "$GITHUB_OUTPUT" || echo "va=true" >> "$GITHUB_OUTPUT"
 
   kernel:
     needs: plan
@@ -71,7 +79,7 @@ jobs:
           git config --global --add safe.directory '*'
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
       - name: Wi-Fi firmware that is built into the kernel
         run: |
           mkdir fw
@@ -101,7 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
       - name: Dependencies
         run: |
           sudo apt-get update -qq
@@ -114,8 +122,36 @@ jobs:
           name: inputplumber
           path: external-and-mods/InputPlumber/inputplumber-0.81.0-konkr
 
+  vaapi:
+    needs: plan
+    if: needs.plan.outputs.va == 'true'
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:bookworm
+    steps:
+      - name: Dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq gcc libva-dev patchelf git python3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Build
+        run: INSIDE=1 OUT="$GITHUB_WORKSPACE/out" bash external-and-mods/v4l2-vaapi/build.sh
+      - name: Check update installation
+        run: python3 scripts/test-av1-update.py
+      - name: Package
+        run: |
+          readelf -h out/msm_drv_video.so | grep -q 'Machine:.*AArch64'
+          readelf -h out/libgbm.so.1 | grep -q 'Machine:.*AArch64'
+          tar -czf vaapi.tar.gz -C out msm_drv_video.so libgbm.so.1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vaapi
+          path: vaapi.tar.gz
+
   publish:
-    needs: [plan, kernel, inputplumber]
+    needs: [plan, kernel, inputplumber, vaapi]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     steps:
@@ -126,3 +162,4 @@ jobs:
       - run: |
           [ ! -f art/kernel/kernel.tar.gz ] || { mv art/kernel/kernel.tar.gz "art/kernel/${{ needs.plan.outputs.kernel_name }}"; gh release upload fork-assets "art/kernel/${{ needs.plan.outputs.kernel_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
           [ ! -f art/inputplumber/inputplumber-0.81.0-konkr ] || { mv art/inputplumber/inputplumber-0.81.0-konkr "art/inputplumber/${{ needs.plan.outputs.ip_name }}"; gh release upload fork-assets "art/inputplumber/${{ needs.plan.outputs.ip_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
+          [ ! -f art/vaapi/vaapi.tar.gz ] || { mv art/vaapi/vaapi.tar.gz "art/vaapi/${{ needs.plan.outputs.va_name }}"; gh release upload fork-assets "art/vaapi/${{ needs.plan.outputs.va_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
