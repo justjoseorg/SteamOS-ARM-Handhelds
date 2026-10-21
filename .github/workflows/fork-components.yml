@@ -192,7 +192,7 @@ jobs:
             libxcb-ewmh-dev libxcb-xinput-dev \
             libwayland-dev wayland-protocols libvulkan-dev libdrm-dev libxkbcommon-dev \
             libcap-dev libsdl2-dev libavif-dev libpixman-1-dev libudev-dev libdecor-0-dev \
-            libluajit-5.1-dev libinput-dev libpipewire-0.3-dev libei-dev libseat-dev \
+            libluajit-5.1-dev libinput-dev libpipewire-0.3-dev libeis-dev libseat-dev \
             libdisplay-info-dev libffi-dev libexpat1-dev libxml2-dev hwdata
       - name: Build and check
         run: CC=gcc-14 CXX=g++-14 OUT="$GITHUB_WORKSPACE/out" bash scripts/build-gamescope-component.sh

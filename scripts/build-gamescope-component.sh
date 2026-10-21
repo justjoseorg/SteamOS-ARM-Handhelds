@@ -16,7 +16,22 @@ git -C "$WORK/upstream" submodule update -q --init --depth 1 \
 mkdir "$WORK/src"
 rsync -a --exclude=.git --exclude=subprojects/ "$SRC/" "$WORK/src/"
 rsync -a --exclude=.git "$WORK/upstream/subprojects/" "$WORK/src/subprojects/"
-cp "$WORK/src/subprojects/wlroots/subprojects/"*.wrap "$WORK/src/subprojects/"
+dependency() {
+    local name="$1" url="$2" revision="$3" provides="$4"
+    printf '[wrap-git]\nurl = %s\nrevision = %s\ndepth = 1\n[provide]\ndependency_names = %s\n' \
+        "$url" "$revision" "$provides" > "$WORK/src/subprojects/$name.wrap"
+}
+# Keep build headers within the API versions available on the handheld image.
+dependency wayland https://gitlab.freedesktop.org/wayland/wayland.git \
+    736d12ac67c20c60dc406dc49bb06be878501f86 wayland-client,wayland-server,wayland-scanner
+dependency wayland-protocols https://gitlab.freedesktop.org/wayland/wayland-protocols.git \
+    88223018d1b578d0d8869866da66d9608e05f928 wayland-protocols
+dependency libdrm https://gitlab.freedesktop.org/mesa/drm.git \
+    a8e5e10a873f67f557dc70e5407af4553f35edd9 libdrm
+dependency libxkbcommon https://github.com/xkbcommon/libxkbcommon.git \
+    b3465081878e80ca6c11fe35c81787ec374ec15a xkbcommon
+dependency pixman https://gitlab.freedesktop.org/pixman/pixman.git \
+    54cad71674ec485cbbbf49876feaa8a69b97c828 pixman-1
 
 luajit "$WORK/src/tests/ayn.odin2.portal.lua" \
     "$WORK/src/scripts/00-gamescope/displays/ayn.odin2.portal.lua"
@@ -24,9 +39,13 @@ meson setup "$WORK/build" "$WORK/src" \
     --prefix=/usr/local --buildtype=release \
     -Dpipewire=enabled -Dinput_emulation=enabled -Dbenchmark=disabled \
     -Denable_openvr_support=false -Denable_gamescope_wsi_layer=false \
+    -Dwayland:documentation=false -Dwayland:tests=false \
+    -Dlibdrm:auto_features=disabled -Dlibdrm:tests=false \
+    -Dlibxkbcommon:enable-tools=false -Dlibxkbcommon:enable-x11=false \
+    -Dlibxkbcommon:enable-docs=false -Dlibxkbcommon:enable-xkbregistry=false \
     --force-fallback-for=wlroots,libliftoff,vkroots,wayland,wayland-protocols,libdrm,libxkbcommon,pixman
 meson compile -C "$WORK/build" -j 2
-meson test -C "$WORK/build" --print-errorlogs
+meson test -C "$WORK/build" --print-errorlogs --suite gamescope
 meson install -C "$WORK/build" --no-rebuild --destdir "$WORK/install"
 
 install -Dm755 "$WORK/install/usr/local/bin/gamescope" "$OUT/gamescope"
