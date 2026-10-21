@@ -185,11 +185,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             gcc-14 g++-14 meson ninja-build pkg-config git rsync cmake \
-            python3-jinja2 python3-pyparsing glslang-tools luajit catch2 \
+            python3-jinja2 python3-pyparsing glslang-tools luajit catch2 xwayland \
             libx11-dev libxdamage-dev libxcomposite-dev libxcursor-dev libxrender-dev \
             libxext-dev libxfixes-dev libxxf86vm-dev libxtst-dev libxres-dev libxmu-dev libxi-dev \
             libxcb-composite0-dev libxcb-icccm4-dev libxcb-render-util0-dev libxcb-res0-dev \
-            libxcb-ewmh-dev libxcb-xinput-dev \
+            libxcb-ewmh-dev libxcb-xinput-dev libxcb-xfixes0-dev \
             libwayland-dev wayland-protocols libvulkan-dev libdrm-dev libxkbcommon-dev \
             libcap-dev libsdl2-dev libavif-dev libpixman-1-dev libudev-dev libdecor-0-dev \
             libluajit-5.1-dev libinput-dev libpipewire-0.3-dev libeis-dev libseat-dev \
