@@ -624,6 +624,7 @@ static VAStatus DestroyContext(VADriverContextP ctx, VAContextID id)
 	dec_close(c);
 	free(c->slices);
 	free(c->av1_slices);
+	free(c->av1_deferred.data);
 	free(c->tiles);
 	free(c->nal);
 	free(c);
@@ -833,22 +834,18 @@ static VAStatus render_av1(struct context *c, struct buffer *b)
 static VAStatus end_av1(struct drv *d, struct context *c)
 {
 	uint8_t *frame = NULL;
-	size_t n = c->have_pic ? av1_build(c, &frame) : 0;
-	if (!n) {
-		c->target->error = 1;
-		return VA_STATUS_ERROR_DECODING_ERROR;
-	}
-	int show = av1_show_frame(c);
-	VAStatus st = VA_STATUS_SUCCESS;
-	if (dec_submit(c, frame, n, c->target)) {
-		st = VA_STATUS_ERROR_DECODING_ERROR;
-	} else if (!show) {
-		/* nothing comes back for a frame that isn't shown */
-		c->target->pending = 0;
-	} else if (c->target->pending && !c->late_output && dec_wait(c, c->target, 1000)) {
-		st = VA_STATUS_ERROR_DECODING_ERROR;
+	VAStatus st = VA_STATUS_ERROR_DECODING_ERROR;
+	if (c->have_pic && !c->failed && !av1_finish_refs(c)) {
+		size_t n = av1_build(c, &frame);
+		if (n && !dec_submit(c, frame, n, c->target) &&
+		    !dec_wait(c, c->target, 1000))
+			st = VA_STATUS_SUCCESS;
 	}
 	free(frame);
+	if (st != VA_STATUS_SUCCESS) {
+		c->target->error = 1;
+		c->failed = 1;
+	}
 	return st;
 }
 

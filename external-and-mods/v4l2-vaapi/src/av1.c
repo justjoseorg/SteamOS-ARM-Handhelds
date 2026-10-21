@@ -12,7 +12,9 @@
  * own slot numbering instead: each frame is stored in a slot of our choosing
  * and ref_frame_idx is written to point at the slots holding the surfaces
  * the client says it references. The client's real slot numbers are never
- * needed.
+ * needed. If all eight slots are live, decode without refreshing any slot.
+ * The next picture's map tells us whether to retain that frame and which old
+ * slot is now free; only then replay it with that slot's refresh bit set.
  *
  * The sequence-level switches that don't change how the tiles parse (screen
  * content tools, superres, restoration, ...) are enabled, and the frame
@@ -149,6 +151,16 @@ static void put_gm_param(struct bw *w, int type, int hp, int idx, int32_t val, i
 
 /* ---- reference bookkeeping ---- */
 
+static int map_has(const VASurfaceID map[8], VASurfaceID id)
+{
+	if (!id || id == VA_INVALID_ID)
+		return 0;
+	for (int i = 0; i < 8; i++)
+		if (map[i] == id)
+			return 1;
+	return 0;
+}
+
 static struct av1_ref *ref_find(struct context *c, VASurfaceID id)
 {
 	if (id == VA_INVALID_ID || !id)
@@ -161,12 +173,20 @@ static struct av1_ref *ref_find(struct context *c, VASurfaceID id)
 
 static const int32_t gm_default[6] = {0, 0, 1 << 16, 0, 0, 1 << 16};
 
-static void ref_save(struct context *c, int intra)
+static int ref_save(struct context *c, int intra)
 {
 	const VADecPictureParameterBufferAV1 *p = &c->av1;
 	struct av1_ref *r = ref_find(c, p->current_frame);
 	if (!r) {
-		r = &c->av1_refs[c->av1_next_ref++ & 15];
+		for (unsigned i = 0; i < 16; i++)
+			if (!map_has(c->av1_slot, c->av1_refs[i].id)) {
+				r = &c->av1_refs[i];
+				break;
+			}
+		if (!r) {
+			dbg(c->drv, "av1: no free reference metadata entry");
+			return -1;
+		}
 		memset(r, 0, sizeof(*r));
 	}
 	r->id = p->current_frame;
@@ -178,6 +198,7 @@ static void ref_save(struct context *c, int intra)
 			if (p->wm[i].wmtype)
 				for (int j = 0; j < 6; j++)
 					r->gm[i + 1][j] = p->wm[i].wmmat[j];
+	return 0;
 }
 
 static int rel_dist(const VADecPictureParameterBufferAV1 *p, int a, int b)
@@ -260,13 +281,14 @@ static size_t write_seq(const struct context *c, uint8_t *out, size_t cap)
 /* ---- frame header (5.9) ---- */
 
 static size_t write_frame(struct context *c, uint8_t *out, size_t cap, uint32_t flags,
-			  const uint8_t *ridx, int *ntiles)
+			  const uint8_t *ridx, int *ntiles, size_t *refresh_bit)
 {
 	const VADecPictureParameterBufferAV1 *p = &c->av1;
 	const typeof(p->seq_info_fields.fields) *sq = &p->seq_info_fields.fields;
 	const typeof(p->pic_info_fields.bits) *pi = &p->pic_info_fields.bits;
 	struct bw b = {.p = out, .cap = cap};
-	int ft = pi->frame_type, show = pi->show_frame;
+	/* VA clients handle presentation; hidden references also need a surface. */
+	int ft = pi->frame_type, show = 1;
 	int intra = ft == 0 || ft == 2;
 	int oh = sq->enable_order_hint, ohb = oh ? p->order_hint_bits_minus_1 + 1 : 0;
 	int mono = sq->mono_chrome, nplanes = mono ? 1 : 3;
@@ -296,6 +318,7 @@ static size_t write_frame(struct context *c, uint8_t *out, size_t cap, uint32_t 
 	put(&b, p->order_hint, ohb);
 	if (!(intra || err_res))
 		put(&b, p->primary_ref_frame, 3);
+	*refresh_bit = b.bits;
 	put(&b, flags, ft == 3 || (ft == 0 && show) ? 0 : 8);
 	if ((!intra || flags != 0xff) && err_res && oh)
 		for (int i = 0; i < 8; i++) {
@@ -751,17 +774,67 @@ static size_t obu(uint8_t *out, int type, const uint8_t *pl, size_t n)
 	return o + n;
 }
 
-int av1_show_frame(const struct context *c)
+static int free_slot(const struct context *c, const VASurfaceID map[8])
 {
-	return c->av1.pic_info_fields.bits.show_frame;
+	for (int j = 0; j < 8; j++) {
+		if (!map_has(map, c->av1_slot[j]))
+			return j;
+		for (int k = 0; k < j; k++)
+			if (c->av1_slot[k] == c->av1_slot[j])
+				return j;
+	}
+	return -1;
+}
+
+int av1_finish_refs(struct context *c)
+{
+	if (!c->av1_deferred.data)
+		return 0;
+	int ret = 0;
+	VASurfaceID id = c->av1_deferred.surface;
+	if (map_has(c->av1.ref_frame_map, id)) {
+		int slot = free_slot(c, c->av1.ref_frame_map);
+		struct surface *s = obj_get(c->drv, O_SURFACE, id);
+		if (slot < 0 || !s || s->ctx != c ||
+		    c->av1_deferred.refresh_bit + 8 > c->av1_deferred.len * 8) {
+			dbg(c->drv, "av1: cannot retain deferred reference %u", id);
+			ret = -1;
+			goto done;
+		}
+		uint8_t flags = (uint8_t)(1u << slot);
+		for (int i = 0; i < 8; i++) {
+			size_t bit = c->av1_deferred.refresh_bit + i;
+			uint8_t mask = (uint8_t)(1u << (7 - (bit & 7)));
+			uint8_t *byte = &c->av1_deferred.data[bit >> 3];
+			*byte = (uint8_t)((*byte & ~mask) |
+				((flags >> (7 - i) & 1) ? mask : 0));
+		}
+		trace(c->drv, "av1: retaining deferred surface %u in slot %d", id, slot);
+		if (dec_submit(c, c->av1_deferred.data, c->av1_deferred.len, s) ||
+		    dec_wait(c, s, 1000)) {
+			dbg(c->drv, "av1: deferred reference %u failed to decode", id);
+			ret = -1;
+			goto done;
+		}
+		c->av1_slot[slot] = id;
+	}
+done:
+	free(c->av1_deferred.data);
+	memset(&c->av1_deferred, 0, sizeof(c->av1_deferred));
+	return ret;
 }
 
 size_t av1_build(struct context *c, uint8_t **out)
 {
 	const VADecPictureParameterBufferAV1 *p = &c->av1;
-	int ft = p->pic_info_fields.bits.frame_type, show = p->pic_info_fields.bits.show_frame;
+	int ft = p->pic_info_fields.bits.frame_type;
 	int intra = ft == 0 || ft == 2;
-	int key_all = ft == 3 || (ft == 0 && show);
+	int key_all = ft == 3 || ft == 0;
+
+	if (ft == 0 && !p->pic_info_fields.bits.show_frame) {
+		dbg(c->drv, "av1: hidden key frames are not supported");
+		return 0;
+	}
 
 	/* Slots: the client's surfaces keep their place, the new frame takes a free one. */
 	for (int i = 0; i < 8; i++)
@@ -770,6 +843,10 @@ size_t av1_build(struct context *c, uint8_t **out)
 	uint8_t ridx[7] = {0};
 	if (!intra)
 		for (int i = 0; i < 7; i++) {
+			if (p->ref_frame_idx[i] >= 8) {
+				dbg(c->drv, "av1: invalid reference index %u", p->ref_frame_idx[i]);
+				return 0;
+			}
 			VASurfaceID s = p->ref_frame_map[p->ref_frame_idx[i]];
 			int slot = -1;
 			for (int j = 0; j < 8 && s && s != VA_INVALID_ID; j++)
@@ -777,47 +854,18 @@ size_t av1_build(struct context *c, uint8_t **out)
 					slot = j;
 			if (slot < 0) {
 				dbg(c->drv, "av1: reference %d (idx %d, surface %u cur %u) not decoded", i, p->ref_frame_idx[i], s, p->current_frame);
-				slot = i ? ridx[0] : 0;
+				return 0;
 			}
 			ridx[i] = (uint8_t)slot;
-			c->av1_stamp[slot] = ++c->av1_clock;
 		}
 	uint32_t flags = 0xff;
-	if (!key_all && ft != 0) {
-		int pick = -1, best_j = 0;
-		for (int j = 0; j < 8 && pick < 0; j++) {
-			int live = 0, dup = 0;
-			for (int k = 0; k < 8 && c->av1_slot[j]; k++)
-				live |= p->ref_frame_map[k] == c->av1_slot[j];
-			for (int k = 0; k < j; k++)
-				dup |= c->av1_slot[k] == c->av1_slot[j];
-			if (!live || dup)
-				pick = j;                /* empty, dropped by the client, or a copy */
-		}
-		/*
-		 * All eight slots hold surfaces the client still has. One of them is
-		 * about to be replaced, which we can't see: take the oldest.
-		 */
-		int bd = 0;
-		for (int j = 0; pick < 0 && j < 8; j++) {
-			struct av1_ref *r = ref_find(c, c->av1_slot[j]);
-			int d = r ? rel_dist(p, r->order_hint, p->order_hint) : 0;
-			if (j == 0 || d < bd || (d == bd && c->av1_stamp[j] < c->av1_stamp[best_j])) {
-				best_j = j;
-				bd = d;
-			}
-		}
-		if (pick < 0)
-			pick = best_j;
-		if (pick < 0)
-			pick = 0;
-		flags = 1u << pick;
-	} else if (ft == 0 && !show) {
-		flags = 0xff;
+	if (!key_all) {
+		int pick = free_slot(c, p->ref_frame_map);
+		flags = pick < 0 ? 0 : 1u << pick;
 	}
 
 #ifdef AV1_TRACE
-	dbg(c->drv, "cur %u ft %d show %d map %u %u %u %u %u %u %u %u idx %u %u %u %u %u %u %u | slots %u %u %u %u %u %u %u %u -> flags %02x ridx %d%d%d%d%d%d%d", p->current_frame, ft, show,
+	dbg(c->drv, "cur %u ft %d source_show %d map %u %u %u %u %u %u %u %u idx %u %u %u %u %u %u %u | slots %u %u %u %u %u %u %u %u -> flags %02x ridx %d%d%d%d%d%d%d", p->current_frame, ft, p->pic_info_fields.bits.show_frame,
 	    p->ref_frame_map[0], p->ref_frame_map[1], p->ref_frame_map[2], p->ref_frame_map[3], p->ref_frame_map[4], p->ref_frame_map[5], p->ref_frame_map[6], p->ref_frame_map[7],
 	    p->ref_frame_idx[0], p->ref_frame_idx[1], p->ref_frame_idx[2], p->ref_frame_idx[3], p->ref_frame_idx[4], p->ref_frame_idx[5], p->ref_frame_idx[6],
 	    c->av1_slot[0], c->av1_slot[1], c->av1_slot[2], c->av1_slot[3], c->av1_slot[4], c->av1_slot[5], c->av1_slot[6], c->av1_slot[7], flags,
@@ -825,8 +873,9 @@ size_t av1_build(struct context *c, uint8_t **out)
 #endif
 	uint8_t seq[48], fh[1024];
 	size_t sl = write_seq(c, seq, sizeof(seq));
+	size_t refresh_bit = 0;
 	int nt = 0;
-	size_t fl = write_frame(c, fh, sizeof(fh), flags, ridx, &nt);
+	size_t fl = write_frame(c, fh, sizeof(fh), flags, ridx, &nt, &refresh_bit);
 	if (!sl || !fl || nt != (int)c->av1_ntiles || !nt) {
 		dbg(c->drv, "av1: can't write headers (seq %zu frame %zu tiles %d of %u)", sl, fl, nt,
 		    c->av1_ntiles);
@@ -837,10 +886,8 @@ size_t av1_build(struct context *c, uint8_t **out)
 	uint8_t *o = malloc(total), *w = o;
 	if (!o)
 		return 0;
-	if (!c->av1_tu_open) {
-		*w++ = 0x12;                 /* temporal delimiter */
-		*w++ = 0;
-	}
+	*w++ = 0x12;                 /* one temporal unit per decoded VA surface */
+	*w++ = 0;
 	if (ft == 0 || (int)sl != c->av1_seq_len || memcmp(seq, c->av1_seq, sl)) {
 		w += obu(w, 1, seq, sl);
 		memcpy(c->av1_seq, seq, sl);
@@ -869,16 +916,29 @@ size_t av1_build(struct context *c, uint8_t **out)
 		n += len;
 		t += 4 + len;
 	}
-	w += obu(w, 6, pl, n);
+	size_t frame_len = obu(w, 6, pl, n);
+	refresh_bit += ((size_t)(w - o) + frame_len - n) * 8;
+	w += frame_len;
 	free(pl);
 
-	c->av1_tu_open = !show;
-	for (int i = 0; i < 8; i++)
-		if (flags >> i & 1) {
-			c->av1_slot[i] = p->current_frame;
-			c->av1_stamp[i] = ++c->av1_clock;
+	if (!flags) {
+		c->av1_deferred.len = (size_t)(w - o);
+		c->av1_deferred.data = malloc(c->av1_deferred.len);
+		if (!c->av1_deferred.data) {
+			free(o);
+			return 0;
 		}
-	ref_save(c, intra);
+		memcpy(c->av1_deferred.data, o, c->av1_deferred.len);
+		c->av1_deferred.refresh_bit = refresh_bit;
+		c->av1_deferred.surface = p->current_frame;
+	}
+	for (int i = 0; i < 8; i++)
+		if (flags >> i & 1)
+			c->av1_slot[i] = p->current_frame;
+	if (ref_save(c, intra)) {
+		free(o);
+		return 0;
+	}
 	*out = o;
 	return (size_t)(w - o);
 }

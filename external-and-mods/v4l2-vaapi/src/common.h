@@ -132,11 +132,14 @@ struct context {
 	size_t tiles_len, tiles_cap;
 	unsigned av1_ntiles;
 	struct av1_ref av1_refs[16];
-	unsigned av1_next_ref;
 	uint8_t av1_seq[48];         /* sequence header last sent */
-	int av1_seq_len, av1_tu_open;
+	int av1_seq_len;
 	VASurfaceID av1_slot[8];     /* what each reference slot of the decoder holds (0: nothing) */
-	uint32_t av1_stamp[8], av1_clock;
+	struct {
+		uint8_t *data;
+		size_t len, refresh_bit;
+		VASurfaceID surface;
+	} av1_deferred;
 
 	/* parameter sets last sent to the firmware */
 	uint8_t sps[96];
@@ -183,7 +186,7 @@ size_t h264_write_pps(const struct context *c, int pps_id, uint8_t *out, size_t 
 /* av1.c */
 int av1_add_tiles(struct context *c, const struct buffer *data);
 size_t av1_build(struct context *c, uint8_t **out);
-int av1_show_frame(const struct context *c);
+int av1_finish_refs(struct context *c);
 
 /* dec.c */
 int dec_has_av1(const char *path);

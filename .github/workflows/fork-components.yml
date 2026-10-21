@@ -138,6 +138,11 @@ jobs:
           ref: ${{ github.sha }}
       - name: Build
         run: INSIDE=1 OUT="$GITHUB_WORKSPACE/out" bash external-and-mods/v4l2-vaapi/build.sh
+      - name: Check AV1 references
+        run: |
+          gcc -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            external-and-mods/v4l2-vaapi/tests/av1.c -o /tmp/test-av1
+          /tmp/test-av1
       - name: Check update installation
         run: python3 scripts/test-av1-update.py
       - name: Package
