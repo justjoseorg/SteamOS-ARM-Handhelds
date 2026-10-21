@@ -52,14 +52,13 @@ STATE = f"{STATE_DIR}/state.json"
 PROFILES = ("silent", "balanced", "turbo")
 
 # temp °C → pwm 0..255, linearly interpolated
+# Every curve starts at a quiet spin (51) instead of off: a fan that keeps
+# stopping and starting is louder than one that never stops.
 FAN_CURVES = {
-    # Silent leans on the chip's headroom (it throttles past ~100 °C): off
-    # to 60, a murmur through the 70s, full only near the top (GitHub #38).
-    "silent":   [(60, 0), (68, 35), (76, 65), (84, 110), (90, 170), (95, 255)],
-    # Balanced: quieter through 60-85 °C, where games sit; the same full
-    # speed at the top.
-    "balanced": [(50, 35), (60, 50), (70, 80), (80, 130), (88, 200), (95, 255)],
-    "turbo":    [(45, 90), (60, 140), (70, 200), (80, 255)],
+    # Silent leans on the chip's headroom (it throttles past ~100 °C).
+    "silent":   [(65, 51), (76, 77), (82, 102), (88, 153), (94, 204), (98, 255)],
+    "balanced": [(55, 51), (72, 77), (78, 102), (84, 153), (90, 204), (96, 255)],
+    "turbo":    [(45, 51), (66, 77), (74, 102), (80, 153), (85, 204), (90, 255)],
 }
 # fraction of the GPU OPP range: (floor, ceiling)
 GPU_RANGE = {"silent": (0.0, 0.75), "balanced": (0.0, 1.0), "turbo": (0.35, 1.0)}
@@ -266,22 +265,36 @@ def curve_pwm(curve, temp: float) -> int:
     return curve[-1][1]
 
 
-# A burst (waking, opening a menu, a loading screen) runs the big cores flat
-# out for a moment and their hotspot sensors jump 40 °C in under a second.
-# Only a reading that stays hot counts as hot; the chip's own limits (LMh)
-# cover the seconds in between.
-HOT_TICKS = 3
+# The fan moves every FAN_STEP_S: towards the curve by at most FAN_UP up and
+# FAN_DOWN down, in steps of FAN_QUANTUM, following a smoothed temperature.
+# Slow down, quicker up, and no small corrections is what keeps it from
+# hunting. Only DANGER_C skips the ramp.
+FAN_STEP_S = 3.0
+FAN_QUANTUM = 8
+# Reaction (Handheld Control): (smoothing, most up, most down) per step.
+FAN_REACTION = {
+    "gentle":  (0.6, 20, 4),
+    "calm":    (0.5, 36, 6),
+    "quick":   (0.35, 64, 12),
+    "instant": (0.2, 255, 32),
+}
+# A fan that may stop starts again this far above its stop temperature.
+FAN_STOP_HYST_C = 3
+FAN_STATUS = "/run/konkr/fan.json"
 DANGER_C = 100
-# Waking from s2idle is such a burst on every core at once: the fan holds its
+# Waking from s2idle runs every core flat out for a moment: the fan holds its
 # speed this long after a resume.
 RESUME_SETTLE_S = 8.0
 
 FIXED_OVERRIDE_ON_C = 90
 FIXED_OVERRIDE_OFF_C = 82
-# Standby (konkr-standby, screen off): fan off while the SoC is below this.
-# The curves never go under their lowest point (35/255 on balanced), so the
-# fan kept spinning all night in standby and drained the battery (Pocket S2).
-STANDBY_FAN_OFF_C = 60
+# Standby (konkr-standby, screen off): off while cool, so it doesn't drain
+# the battery overnight (Pocket S2), a quiet spin while warm, and half speed
+# once hot so the device doesn't cook in a bag.
+STANDBY_FAN_OFF_C = 45
+STANDBY_FAN_HOT_C = 55
+STANDBY_PWM = 51
+STANDBY_HOT_PWM = 128
 
 
 def game_fan(st: dict) -> dict | None:
@@ -289,16 +302,44 @@ def game_fan(st: dict) -> dict | None:
     set in Handheld Control) over the global ones. A game entry is either
     {"curve": "silent"|"balanced"|"turbo"} or {"mode": "fixed", "fixed": n};
     fan boost still wins."""
-    glob_fan = st.get("fan") or {}
+    glob_fan = {**(st.get("fan") or {}), "curves": st.get("fan_curves") or {}}
     entry = (st.get("fan_games") or {}).get(str(CURRENT_APPID)) if CURRENT_APPID else None
     if not entry:
         return glob_fan
-    out = {"boost": glob_fan.get("boost", False)}
+    out = {k: glob_fan.get(k) for k in ("boost", "reaction", "stop_below", "charging_min", "curves")}
     if entry.get("mode") == "fixed":
         out.update(mode="fixed", fixed=int(entry.get("fixed", 50)))
     else:
         out.update(mode="auto", curve=entry.get("curve", ""))
     return out
+
+
+def on_charger() -> bool:
+    for d in glob.glob("/sys/class/power_supply/*"):
+        if rd(f"{d}/type") not in ("Battery", "") and rd(f"{d}/online") == "1":
+            return True
+    return False
+
+
+def custom_curve(points) -> list | None:
+    """A curve from Handheld Control ([temp °C, speed %] pairs) as pwm
+    points, sorted, with the speed never dropping as the temperature rises."""
+    try:
+        pts = sorted((max(20, min(105, int(t))), max(0, min(100, int(p)))) for t, p in points)
+    except (TypeError, ValueError):
+        return None
+    out = []
+    for t, pct in pts:
+        if out and t <= out[-1][0]:
+            continue
+        out.append((t, max(round(pct * 2.55), out[-1][1] if out else 0)))
+    return out if len(out) >= 2 else None
+
+
+def fan_curve(name: str, curves: dict) -> list | None:
+    if name in FAN_CURVES:
+        return FAN_CURVES[name]
+    return custom_curve(curves.get(name) or []) if name else None
 
 
 class Fan:
@@ -309,9 +350,9 @@ class Fan:
         self.failsafe = conf.getint("fan", "failsafe_pwm")
         self.cur = -1
         self.smooth = None
-        self.set_temp = 0.0
+        self.next_step = 0.0
+        self.stopped = False
         self.hot_override = False
-        self.hot_ticks = 0
         self.slept = None
         self.settle_until = 0.0
         if self.enabled:
@@ -337,13 +378,14 @@ class Fan:
             self.cur = 255
             self.smooth = None
             return
-        if standby and raw < STANDBY_FAN_OFF_C:
-            if self.cur != 0 and wr(f"{self.dir}/pwm1", 0):
-                log(f"fan: standby, {raw:.0f} C -> off")
-                self.cur = 0
-            # the curve picks up from here on wake (going up is immediate)
+        if standby and raw < DANGER_C:
+            step = (0 if raw < STANDBY_FAN_OFF_C else
+                    STANDBY_PWM if raw < STANDBY_FAN_HOT_C else STANDBY_HOT_PWM)
+            if step != self.cur and wr(f"{self.dir}/pwm1", step):
+                log(f"fan: standby, {raw:.0f} C -> pwm {step}")
+                self.cur = step
+            # the curve picks up from here on wake
             self.smooth = raw
-            self.set_temp = raw
             return
         # Safety: never hold a low fixed speed when hot. Latched with
         # hysteresis: under load the SoC sits right at 90 °C, and flipping
@@ -366,38 +408,54 @@ class Fan:
                 log(f"fan: fixed {fan.get('fixed')}% -> pwm {step}")
                 self.cur = step
             return
-        if fan.get("curve") in FAN_CURVES:
-            profile = fan["curve"]          # a game's own curve (game_fan())
-        if fan.get("boost"):
-            profile = "turbo"
-        # Smooth short spikes (boot, shader compiles) but react at once to
-        # genuinely hot readings.
-        # Genuinely hot: the chip as a whole at 85 C, or any one sensor at
-        # 95 C. A single hotspot touching 85 for a moment while the rest sat
-        # near 60 used to throw the fan from 30 to 100 % (RP6, Silent).
-        if time.monotonic() < self.settle_until and raw < DANGER_C:
-            return
-        self.hot_ticks = self.hot_ticks + 1 if (follow >= 85 or raw >= 95) else 0
-        hot = self.hot_ticks >= HOT_TICKS or raw >= DANGER_C
-        if self.smooth is None or hot:
-            self.smooth = follow
+        # a game's own curve or one picked in Handheld Control, else the
+        # profile's; boost wins over both
+        name = "turbo" if fan.get("boost") else fan.get("curve") or profile
+        curve = fan_curve(name, fan.get("curves") or {}) or FAN_CURVES[profile]
+        smoothing, up, down = FAN_REACTION.get(fan.get("reaction"), FAN_REACTION["calm"])
+        stop_below = int(fan.get("stop_below") or 0)
+        # plugged in, the fan may keep a speed of its own (the charger heats
+        # the battery as much as a game does)
+        floor = round(int(fan.get("charging_min") or 0) * 2.55)
+        if floor and on_charger():
+            stop_below = 0
         else:
-            self.smooth = 0.85 * self.smooth + 0.15 * follow
-        temp = self.smooth
-        want = max(self.min_pwm, curve_pwm(FAN_CURVES[profile], temp))
-        if want > self.cur:
-            # up: at most 20 a second (a burst no longer makes it surge),
-            # straight there when the chip is genuinely hot
-            step = want if hot or self.cur < 0 else min(want, self.cur + 20)
-            self.set_temp = temp
-        elif want < self.cur and temp <= self.set_temp - 3:
-            step = max(want, self.cur - 15)      # down: once 3 °C below, ramp
-        else:
+            floor = 0
+        now = time.monotonic()
+        if now < self.settle_until and raw < DANGER_C:
             return
-        if step != self.cur and wr(f"{self.dir}/pwm1", step):
-            if abs(step - self.cur) >= 40 or self.cur < 0:
-                log(f"fan: {temp:.1f} C (hottest {raw:.0f} C, {hottest_zone()}) -> pwm {step}")
-            self.cur = step
+        if raw >= DANGER_C:
+            want = 255
+        elif now < self.next_step:
+            return
+        else:
+            self.smooth = follow if self.smooth is None else (
+                smoothing * self.smooth + (1 - smoothing) * follow)
+            self.stopped = bool(stop_below) and self.smooth < stop_below + (
+                FAN_STOP_HYST_C if self.stopped else 0)
+            target = 0 if self.stopped else max(self.min_pwm, floor, curve_pwm(curve, self.smooth))
+            want = target
+            if self.cur >= 0 and not self.stopped:
+                want = max(self.cur - down, min(self.cur + up, want))
+            if want:
+                want = min(255, max(FAN_QUANTUM, round(want / FAN_QUANTUM) * FAN_QUANTUM))
+            self.status(name, target)
+        self.next_step = now + FAN_STEP_S
+        if want != self.cur and wr(f"{self.dir}/pwm1", want):
+            if abs(want - self.cur) >= 40 or self.cur < 0:
+                log(f"fan: {self.smooth or follow:.1f} C (hottest {raw:.0f} C, {hottest_zone()}) -> pwm {want}")
+            self.cur = want
+
+    def status(self, name: str, target: int) -> None:
+        """What the fan is doing, for Handheld Control's graph."""
+        try:
+            os.makedirs(os.path.dirname(FAN_STATUS), exist_ok=True)
+            with open(FAN_STATUS + ".tmp", "w", encoding="utf-8") as fh:
+                json.dump({"curve": name, "temp": round(self.smooth, 1),
+                           "pwm": max(self.cur, 0), "target": target}, fh)
+            os.replace(FAN_STATUS + ".tmp", FAN_STATUS)
+        except OSError:
+            pass
 
     def failsafe_now(self) -> None:
         if self.dir:
@@ -491,6 +549,56 @@ def big_cpus() -> set[int]:
     return big or set(caps)
 
 
+# ------------------------------------------------------ per-game perf ----
+# Set per game in Handheld Control (state "perf_games", keyed by App ID):
+# a profile of its own, CPU and GPU caps, the cores its threads may use and
+# their priority. Applied when the game starts, and at once when changed
+# while it runs; the profile's own values come back when it exits.
+GAME_PRIORITY = {"normal": 0, "high": -5, "highest": -10}
+
+
+def game_perf(st: dict) -> dict:
+    entry = (st.get("perf_games") or {}).get(str(CURRENT_APPID)) if CURRENT_APPID else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def game_cores(value) -> set[int] | None:
+    """The cores a game may run on: None leaves it to the default."""
+    every = set(range(os.cpu_count() or 8))
+    if value == "all":
+        return every
+    if value == "big":
+        return big_cpus()
+    if isinstance(value, str) and value not in ("", "default"):
+        cpus = cpu_list(value) & every
+        return cpus or None
+    return None
+
+
+def cap_cpu(frac: float) -> None:
+    """Every cluster to at most frac of its top clock (never raises a cap
+    that is already lower, such as Steam's TDP limit)."""
+    for pol in glob.glob("/sys/devices/system/cpu/cpufreq/policy*"):
+        freqs = sorted(int(f) for f in rd(f"{pol}/scaling_available_frequencies").split() if f.isdigit())
+        if not freqs:
+            continue
+        want = max([f for f in freqs if f <= freqs[-1] * frac] or freqs[:1])
+        cur = int(rd(f"{pol}/scaling_max_freq", str(freqs[-1])) or freqs[-1])
+        wr(f"{pol}/scaling_max_freq", min(cur, want))
+
+
+def cap_gpu(lo: float, hi: float) -> None:
+    d = gpu_devfreq()
+    freqs = sorted(int(f) for f in rd(f"{d}/available_frequencies").split() if f.isdigit()) if d else []
+    if not freqs:
+        return
+    fmin = freqs[int(lo * (len(freqs) - 1))]
+    fmax = max(fmin, freqs[int(round(hi * (len(freqs) - 1)))])
+    wr(f"{d}/max_freq", freqs[-1])
+    wr(f"{d}/min_freq", fmin)
+    wr(f"{d}/max_freq", fmax)
+
+
 # ---------------------------------------------------------- game boost ----
 class SchedAttr(ctypes.Structure):
     _fields_ = [("size", ctypes.c_uint32), ("sched_policy", ctypes.c_uint32),
@@ -580,13 +688,17 @@ class GameBoost:
         self.enabled = conf.getboolean("games", "boost")
         self.avoid_little = conf.getboolean("games", "avoid_little_cores")
         self.big = big_cpus()
-        self.done: dict[int, int] = {}  # tid → uclamp value applied
+        self.done: dict[int, tuple] = {}  # tid → what was applied
+        self.perf: dict = {}              # the running game's own settings
 
     def tick(self, profile: str) -> None:
         if not self.enabled:
+            scan_procs()
             return
         live = set()
         games, ui = scan_procs()
+        cores = game_cores(self.perf.get("cores"))
+        nice = GAME_PRIORITY.get(self.perf.get("priority"), 0)
         targets = [(pid, GAME_UCLAMP[profile]) for pid in games]
         targets += [(pid, UI_UCLAMP[profile]) for pid in ui]
         games_set = set(games)
@@ -597,19 +709,24 @@ class GameBoost:
                 io = IO_DOWNLOAD
             else:
                 io = IO_UI
+            game = pid in games_set
+            mask = (cores if game and cores else self.big if self.avoid_little and self.big else None)
+            want = (val, frozenset(mask or ()), nice if game else None)
             for t in glob.glob(f"/proc/{pid}/task/*"):
                 tid = int(os.path.basename(t))
                 live.add(tid)
-                if self.done.get(tid) == val:
+                if self.done.get(tid) == want:
                     continue
                 set_ioprio(tid, io)
                 try:
-                    if self.avoid_little and self.big:
-                        os.sched_setaffinity(tid, self.big)
+                    if mask:
+                        os.sched_setaffinity(tid, mask)
+                    if game:
+                        os.setpriority(os.PRIO_PROCESS, tid, nice)
                 except OSError:
                     pass
                 set_uclamp_min(tid, val)
-                self.done[tid] = val
+                self.done[tid] = want
         for tid in list(self.done):
             if tid not in live:
                 del self.done[tid]
@@ -1263,6 +1380,7 @@ class Daemon:
         self.st = load_state()
         self.fan = Fan(self.conf)
         self.games = GameBoost(self.conf)
+        self.perf_key = "{}"
         self.leds = Leds()
         self.keys = Hotkeys()
         self.touch = TouchBoost()
@@ -1288,16 +1406,32 @@ class Daemon:
         log("stopped (fan at failsafe)")
         sys.exit(0)
 
+    def profile_now(self) -> str:
+        """The profile in force: the running game's own, else the chosen one."""
+        p = game_perf(self.st).get("profile")
+        return p if p in PROFILES else self.st["profile"]
+
     def apply_profile(self, flash: bool = True) -> None:
-        p = self.st["profile"]
+        g = game_perf(self.st)
+        p = self.profile_now()
         apply_cpu(p)
         apply_gpu(p)
         if power_limits:
             power_limits.apply(self.st)
+        # the game's caps go on top, after Steam's TDP limit (which resets the
+        # CPU ceiling), and a manual GPU clock from Steam still wins
+        if g.get("cpu_max"):
+            cap_cpu(max(30, min(100, int(g["cpu_max"]))) / 100)
+        if ("gpu_min" in g or "gpu_max" in g) and not self.st.get("gpu_manual_mhz"):
+            lo, hi = GPU_RANGE[p]
+            cap_gpu(max(0, min(100, int(g.get("gpu_min", lo * 100)))) / 100,
+                    max(0, min(100, int(g.get("gpu_max", hi * 100)))) / 100)
+        self.games.perf = g
         self.games.done.clear()
+        self.perf_key = json.dumps(g, sort_keys=True)
         if flash:
             self.leds.flash(PROFILE_RGB[p])
-        log(f"profile {p}")
+        log(f"profile {p}" + (f" (game {CURRENT_APPID}: {self.perf_key})" if g else ""))
 
     def set_rgb(self, req: str) -> None:
         """rgb-set:<static|breath|off>:<rrggbb>:<brightness 0-255> from the
@@ -1473,7 +1607,7 @@ class Daemon:
                     ensure_gamepad_mode(self.conf)
             if now >= next_slow:
                 next_slow = now + 1.0
-                p = self.st["profile"]
+                p = self.profile_now()
                 self.fan.tick(p, game_fan(self.st), os.path.exists(STANDBY_FLAG))
                 self.leds.tick(self.st.get("power_led", True))
                 # Battery/heat light modes follow the device every 10 s.
@@ -1484,6 +1618,9 @@ class Daemon:
                     if live is not None and getattr(self.leds, "shown_rgb", None) != (mode, live):
                         self.leds.apply_sticks(self.st)
                 self.games.tick(p)
+                # a game with settings of its own started or quit
+                if json.dumps(game_perf(self.st), sort_keys=True) != self.perf_key:
+                    self.apply_profile(flash=False)
 
 
 if __name__ == "__main__":

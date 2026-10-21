@@ -1,0 +1,103 @@
+From: hashtagbasit <53941105+hashtagbasit@users.noreply.github.com>
+Subject: [PATCH] arm64: built-in DTB takes the RAM banks from the bootloader's DTB
+
+The Legion Y700 Gen 4 kernel always boots its built-in device tree, whose
+memory node is a 16 GB tablet's. The 12 GB model has nothing behind the
+top 4 GB, so the kernel froze on the Lenovo logo before any output.
+
+Read the built-in tree where the kernel image maps it, take only the
+memory banks from the tree the bootloader passes (mapped once at the FDT
+fixmap slot), and fall back to the built-in banks when that has none. The built-in tree is
+used from a copy in .bss: the linked-in one is freed with init memory and
+the reserved-memory names point into it (fastrpc crashed looking one up).
+---
+--- a/arch/arm64/kernel/setup.c
++++ b/arch/arm64/kernel/setup.c
+@@ -27,6 +27,7 @@
+ #include <linux/proc_fs.h>
+ #include <linux/memblock.h>
+ #include <linux/of_fdt.h>
++#include <linux/libfdt.h>
+ #include <linux/efi.h>
+ #include <linux/psci.h>
+ #include <linux/sched/task.h>
+@@ -207,6 +208,69 @@
+ 	dump_stack_set_arch_desc("%s (DT)", name);
+ }
+ 
++#ifdef CONFIG_BUILTIN_DTB
++/*
++ * The built-in device tree carries one tablet's RAM banks, but the same
++ * board ships with 12 GB and 16 GB. A 16 GB map on a 12 GB tablet sends
++ * the kernel into missing memory before anything reaches the screen. The
++ * bootloader still passes its own device tree with this tablet's real
++ * banks: take the memory from there and everything else from ours.
++ *
++ * The built-in tree is read where the kernel maps it, so the FDT fixmap slot
++ * is mapped once, for the bootloader's tree: pointing a live mapping at
++ * another physical page trips pgattr_change_is_safe(). And it is read from a
++ * copy that outlives init: the reserved-memory names point into it, and the
++ * linked-in tree (.dtb.init.rodata) is freed with the rest of init memory,
++ * which crashed fastrpc's region lookup after boot.
++ */
++static u8 builtin_fdt[SZ_512K] __aligned(SZ_8);
++
++static void __init setup_builtin_fdt(void)
++{
++	void *dt = (void *)__dtb_start, *loader;
++	phys_addr_t dt_phys = __pa_symbol(__dtb_start);
++	phys_addr_t builtin_mem;
++	bool from_loader = false;
++	const char *name;
++	int size;
++
++	if (fdt_totalsize(dt) <= sizeof(builtin_fdt)) {
++		memcpy(builtin_fdt, dt, fdt_totalsize(dt));
++		dt = builtin_fdt;
++		dt_phys = __pa_symbol(builtin_fdt);
++	}
++	if (!early_init_dt_scan(dt, dt_phys)) {
++		pr_crit("\nError: invalid built-in device tree\n");
++		while (true)
++			cpu_relax();
++	}
++	pr_info("Using built-in device tree\n");
++	builtin_mem = memblock_phys_mem_size();
++
++	loader = fixmap_remap_fdt(__fdt_pointer, &size, PAGE_KERNEL_RO);
++	if (loader) {
++		memblock_remove(0, PHYS_ADDR_MAX);
++		initial_boot_params = loader;
++		early_init_dt_scan_memory();
++		from_loader = memblock_phys_mem_size() != 0;
++		initial_boot_params = dt;
++		/* Nothing usable from the bootloader: the built-in banks. */
++		if (!from_loader)
++			early_init_dt_scan_memory();
++	}
++	pr_info("RAM from the %s device tree: %llu MiB (built-in: %llu MiB)\n",
++		from_loader ? "bootloader's" : "built-in",
++		(unsigned long long)memblock_phys_mem_size() >> 20,
++		(unsigned long long)builtin_mem >> 20);
++
++	name = of_flat_dt_get_machine_name();
++	if (name) {
++		pr_info("Machine model: %s\n", name);
++		dump_stack_set_arch_desc("%s (DT)", name);
++	}
++}
++#endif
++
+ static void __init request_standard_resources(void)
+ {
+ 	struct memblock_region *region;
+@@ -290,8 +354,7 @@
+ 	early_ioremap_init();
+ 
+ #ifdef CONFIG_BUILTIN_DTB
+-	setup_machine_fdt(__pa_symbol(__dtb_start));
+-	pr_info("Using built-in device tree\n");
++	setup_builtin_fdt();
+ #else
+ 	setup_machine_fdt(__fdt_pointer);
+ #endif

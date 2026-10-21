@@ -89,13 +89,22 @@ while IFS=$'\t' read -r target hash src how; do
   if [[ "$how" == squash ]]; then paths+=("$src" "${src%.mdt}.b*"); else paths+=("$src"); fi
 done < "$MANIFEST"
 adb exec-out "su -c 'cd / && tar -cf - $(printf '%s ' "${paths[@]#/}") 2>/dev/null'" > "$W/fw-src.tar"
-mkdir -p "$W/src" "$W/fw"; tar -xf "$W/fw-src.tar" -C "$W/src" 2>/dev/null || true
-python3 - "$MANIFEST" "$W/src" "$W/fw" <<'PY'
-import hashlib, os, struct, sys
+# Tar to tar, never through folders on the PC: on Windows and macOS disks
+# qcom/kaanapali/Lenovo/ (the GPU's zap shader) and qcom/kaanapali/lenovo/
+# (everything else) are one folder, and the GPU never found its zap shader.
+python3 - "$MANIFEST" "$W/fw-src.tar" "$W/firmware.tar" <<'PY'
+import hashlib, io, struct, sys, tarfile, time
 manifest, src, out = sys.argv[1:]
+files = {}
+with tarfile.open(src) as t:
+    for m in t:
+        if m.isfile(): files["/" + m.name.lstrip("./")] = t.extractfile(m).read()
+def read(path):
+    if path not in files: raise OSError("not on the tablet")
+    return files[path]
 def squash(mdt):
     """Qualcomm split image (X.mdt + X.bNN) back into one ELF, each segment at its p_offset."""
-    data = open(mdt, "rb").read()
+    data = read(mdt)
     if data[:4] != b"\x7fELF": raise ValueError("not an ELF")
     is64 = data[4] == 2
     phoff = struct.unpack_from("<Q" if is64 else "<I", data, 0x20 if is64 else 0x1c)[0]
@@ -107,30 +116,29 @@ def squash(mdt):
             else (struct.unpack_from("<I", data, ph + 4)[0], struct.unpack_from("<I", data, ph + 0x10)[0])
         if not size: continue
         seg = f"{mdt[:-4]}.b{i:02d}"
-        if os.path.exists(seg): chunk = open(seg, "rb").read()
+        if seg in files: chunk = files[seg]
         elif off + size <= len(data): chunk = data[off:off + size]
-        else: raise ValueError(f"missing {os.path.basename(seg)}")
-        if len(chunk) != size: raise ValueError(f"{os.path.basename(seg)} has the wrong size")
+        else: raise ValueError(f"missing {seg.rsplit('/', 1)[1]}")
+        if len(chunk) != size: raise ValueError(f"{seg.rsplit('/', 1)[1]} has the wrong size")
         if len(img) < off: img += bytes(off - len(img))
         img[off:off + size] = chunk
     return bytes(img)
-missing, other = [], 0
-for line in open(manifest):
-    if line.startswith("#") or not line.strip(): continue
-    target, want, srcpath, how = line.rstrip("\n").split("\t")
-    p = os.path.join(src, srcpath.lstrip("/"))
-    try:
-        blob = squash(p) if how == "squash" else open(p, "rb").read()
-    except (OSError, ValueError) as e:
-        missing.append(f"{target} ({e})"); continue
-    if hashlib.sha256(blob).hexdigest() != want: other += 1
-    dst = os.path.join(out, target); os.makedirs(os.path.dirname(dst), exist_ok=True)
-    open(dst, "wb").write(blob)
-print(f"firmware: {sum(len(f) for _, _, f in os.walk(out))} files" + (f", {other} differ from the 18.0.12.104 set" if other else ""))
+missing, other, n = [], 0, 0
+with tarfile.open(out, "w") as t:
+    for line in open(manifest):
+        if line.startswith("#") or not line.strip(): continue
+        target, want, srcpath, how = line.rstrip("\n").split("\t")
+        try:
+            blob = squash(srcpath) if how == "squash" else read(srcpath)
+        except (OSError, ValueError) as e:
+            missing.append(f"{target} ({e})"); continue
+        if hashlib.sha256(blob).hexdigest() != want: other += 1
+        m = tarfile.TarInfo("./" + target); m.size = len(blob); m.mode = 0o644; m.mtime = int(time.time())
+        t.addfile(m, io.BytesIO(blob)); n += 1
+print(f"firmware: {n} files" + (f", {other} differ from the 18.0.12.104 set" if other else ""))
 if missing:
     print("missing:\n  " + "\n  ".join(missing)); sys.exit(1)
 PY
-(cd "$W/fw" && tar -cf "$W/firmware.tar" .)
 echo "$android" > "$W/android-boot.sha256"
 
 say "   ... onto the microSD card"

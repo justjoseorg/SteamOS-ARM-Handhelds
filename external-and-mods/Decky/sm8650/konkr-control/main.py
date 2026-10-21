@@ -12,6 +12,8 @@ import asyncio
 import glob
 import json
 import os
+import re
+import socket
 import subprocess
 from typing import Any
 
@@ -22,6 +24,7 @@ STATE = "/var/lib/odin3/state.json" if ODIN3D else "/var/lib/konkrd/state.json"
 DAEMON = "odin3d" if ODIN3D else "konkrd"
 BLACKLIST = "/etc/modprobe.d/konkr-mcu.conf"
 FLIP = "/etc/steamos-arm/flip-screen"
+REQUEST = "/run/konkrd/request"
 
 
 def gen5() -> bool:
@@ -70,6 +73,31 @@ def load() -> dict[str, Any]:
 
 
 GAME_FILE = "/run/konkr/game.json"
+FAN_FILE = "/run/konkr/fan.json"
+# konkrd's built-in curves as [temp °C, speed %], for the graph and as the
+# starting point of a new curve. Keep in step with FAN_CURVES in konkrd.
+BUILTIN_CURVES = {
+    "silent": [[65, 20], [76, 30], [82, 40], [88, 60], [94, 80], [98, 100]],
+    "balanced": [[55, 20], [72, 30], [78, 40], [84, 60], [90, 80], [96, 100]],
+    "turbo": [[45, 20], [66, 30], [74, 40], [80, 60], [85, 80], [90, 100]],
+}
+REACTIONS = ("gentle", "calm", "quick", "instant")
+MAX_CURVES = 8
+
+
+def clean_curve(points: Any) -> list[list[int]] | None:
+    """Sorted [temp, speed] points, 2 to 8, the speed never dropping as the
+    temperature rises; None if there aren't two usable points."""
+    out: list[list[int]] = []
+    try:
+        pts = sorted((max(20, min(105, int(t))), max(0, min(100, int(p)))) for t, p in points)
+    except (TypeError, ValueError):
+        return None
+    for t, p in pts:
+        if out and t <= out[-1][0]:
+            continue
+        out.append([t, max(p, out[-1][1] if out else 0)])
+    return out[:8] if len(out) >= 2 else None
 
 
 def game_fan_state(st: dict[str, Any]) -> dict[str, Any]:
@@ -86,6 +114,16 @@ def game_fan_state(st: dict[str, Any]) -> dict[str, Any]:
     else:
         choice = entry.get("curve", "global")
     return {"appid": appid, "fan": choice}
+
+
+def fan_live() -> dict[str, Any] | None:
+    """What konkrd's fan curve sees right now (smoothed temperature, the
+    speed it's on and the one it's heading for)."""
+    try:
+        with open(FAN_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
 
 
 def save(st: dict[str, Any]) -> None:
@@ -122,6 +160,22 @@ def telemetry() -> dict[str, Any]:
 POWER = ["busctl", "--system", "--", "org.steamos_arm.Power", "/org/steamos_arm/Power", "org.steamos_arm.Power1"]
 
 
+LIMIT = ["com.steampowered.SteamOSManager1.BatteryChargeLimit1", "MaxChargeLevel"]
+
+
+def charge_limit() -> int | None:
+    """Steam's charge limit as our power service keeps it: a percentage, 100
+    for none, None without a battery that takes one."""
+    if not glob.glob("/sys/class/power_supply/*/charge_control_end_threshold"):
+        return None
+    r = subprocess.run(["busctl", "--system", "get-property", *POWER[3:5], *LIMIT],
+                       capture_output=True, text=True, timeout=5)
+    if r.returncode != 0:
+        return None
+    v = int(r.stdout.split()[-1])
+    return 100 if v < 0 else v
+
+
 def bypass_state() -> dict[str, Any]:
     out: dict[str, Any] = {"supported": False, "on": False, "level": 55}
     for prop, key in (("BypassSupported", "supported"), ("BypassCharging", "on"), ("BypassLevel", "level")):
@@ -132,6 +186,76 @@ def bypass_state() -> dict[str, Any]:
         val = r.stdout.split(maxsplit=1)[-1].strip()
         out[key] = (val == "true") if key != "level" else int(val)
     return out
+
+
+STEAM = "/home/steamos/.local/share/Steam"
+# Steam's own tools show up as installed apps too.
+NOT_GAMES = re.compile(r"^(Proton|Steam Linux Runtime|Steamworks Common|SteamVR|FEX$|Lepton$)", re.I)
+
+
+def installed_games() -> list[dict[str, Any]]:
+    """Installed Steam games, by name, from every library's app manifests."""
+    libs = {f"{STEAM}/steamapps"}
+    for path in re.findall(r'"path"\s+"([^"]+)"', rd(f"{STEAM}/steamapps/libraryfolders.vdf")):
+        libs.add(f"{path}/steamapps")
+    games = {}
+    for lib in libs:
+        for mf in glob.glob(f"{lib}/appmanifest_*.acf"):
+            text = rd(mf)
+            appid = re.search(r'"appid"\s+"(\d+)"', text)
+            name = re.search(r'"name"\s+"([^"]+)"', text)
+            if appid and name and not NOT_GAMES.match(name.group(1)):
+                games[int(appid.group(1))] = name.group(1)
+    return [{"appid": a, "name": n} for a, n in sorted(games.items(), key=lambda g: g[1].lower())]
+
+
+GAME_PRIORITIES = ("normal", "high", "highest")
+
+
+def clean_perf(cfg: dict[str, Any]) -> dict[str, Any]:
+    """A game's own performance settings, leaving out what follows the
+    profile anyway."""
+    out: dict[str, Any] = {}
+    if cfg.get("profile") in PROFILES:
+        out["profile"] = cfg["profile"]
+    if str(cfg.get("cpu_max", "")).isdigit() and int(cfg["cpu_max"]) < 100:
+        out["cpu_max"] = max(30, int(cfg["cpu_max"]))
+    for key in ("gpu_min", "gpu_max"):
+        if str(cfg.get(key, "")).isdigit():
+            out[key] = min(100, int(cfg[key]))
+    if "gpu_min" in out and "gpu_max" in out and out["gpu_min"] > out["gpu_max"]:
+        out["gpu_min"] = out["gpu_max"]
+    cores = str(cfg.get("cores", "default")).replace(" ", "")
+    if cores in ("all", "big") or (cores not in ("", "default") and re.fullmatch(r"\d+(-\d+)?(,\d+(-\d+)?)*", cores)):
+        out["cores"] = cores
+    if cfg.get("priority") in GAME_PRIORITIES[1:]:
+        out["priority"] = cfg["priority"]
+    return out
+
+
+def system_info() -> dict[str, Any]:
+    osr = dict(line.split("=", 1) for line in rd("/etc/os-release").splitlines() if "=" in line)
+    ips = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                         capture_output=True, text=True).stdout.split("\n")
+    return {
+        "os": osr.get("PRETTY_NAME", "").strip('"'),
+        "build": osr.get("BUILD_ID", "").strip('"'),
+        "kernel": os.uname().release,
+        "ip": ", ".join(l.split()[3].split("/")[0] for l in ips if len(l.split()) > 3),
+        "ssh": subprocess.run(["systemctl", "is-active", "--quiet", "sshd"]).returncode == 0,
+        "has_password": has_password(),
+    }
+
+
+def has_password(user: str = "steamos") -> bool:
+    """SSH logs in with the user's password (root login is off), and sshd
+    turns away an empty one."""
+    for line in rd("/etc/shadow").splitlines():
+        name, _, rest = line.partition(":")
+        if name == user:
+            pw = rest.split(":", 1)[0]
+            return bool(pw) and pw[0] not in "!*"
+    return False
 
 
 def mode_of(st: dict[str, Any]) -> tuple[str, bool]:
@@ -187,13 +311,20 @@ class Plugin:
             "profile": st["profile"],
             "rgb": st["rgb"],
             "fan": st["fan"],
+            "fan_curves": st.get("fan_curves") or {},
+            "builtin_curves": BUILTIN_CURVES,
+            "fan_live": fan_live(),
+            "fan_editor": not ODIN3D,
+            "perf_games": st.get("perf_games") or {},
+            "fan_games": st.get("fan_games") or {},
+            "cpus": os.cpu_count() or 8,
             "game": game_fan_state(st),
             "power_led": st["power_led"],
             "menu_clicks": st["menu_clicks"],
             "has_flip": tablet(),
             "flip": os.path.exists(FLIP),
             # Tablets: SteamOS on the microSD card next to Android. Handhelds:
-            # ROCKNIX ABL, whose menu picks Android or Linux.
+            # OpenABL / ROCKNIX ABL, whose menu picks Android or Linux.
             "has_dualboot": not tablet() or subprocess.run(["sh", "-c", "findmnt -no SOURCE / | grep -q mmcblk"]).returncode == 0,
             "dualboot_label": ("Restart into ZUI" if gen5() else "Restart into ZUXOS") if tablet() else "Restart into Android",
             "dualboot_text": ("SteamOS runs from the microSD card. This restarts into "
@@ -214,6 +345,8 @@ class Plugin:
             "sticks_led": bool(leds),
             "daemon": subprocess.run(["systemctl", "is-active", "--quiet", DAEMON]).returncode == 0,
             "bypass": await asyncio.to_thread(bypass_state),
+            "charge_limit": await asyncio.to_thread(charge_limit),
+            "system": await asyncio.to_thread(system_info),
             **await asyncio.to_thread(telemetry),
         }
 
@@ -222,6 +355,28 @@ class Plugin:
                                                  "BypassCharging", "b", "true" if on else "false"],
                                 capture_output=True, timeout=5)
         return await asyncio.to_thread(bypass_state)
+
+    async def set_ssh(self, on: bool = False, **_: Any) -> bool:
+        if on and not has_password():
+            return False
+        await asyncio.to_thread(subprocess.run, ["systemctl", "enable" if on else "disable", "--now", "sshd"])
+        return system_info()["ssh"]
+
+    async def set_password(self, password: str = "", **_: Any) -> bool:
+        """Password for the steamos user (sudo and SSH use it)."""
+        if len(password) < 4 or any(c in password for c in ":\n"):
+            return False
+        r = await asyncio.to_thread(subprocess.run, ["chpasswd"], input=f"steamos:{password}\n",
+                                    text=True, capture_output=True)
+        return r.returncode == 0
+
+    async def set_charge_limit(self, level: int = 100, **_: Any) -> int | None:
+        """Stop charging at level % (100 = charge to full)."""
+        level = int(level)
+        await asyncio.to_thread(subprocess.run, ["busctl", "--system", "set-property", "--", *POWER[3:5], *LIMIT,
+                                                 "i", str(-1 if level >= 100 else max(55, level))],
+                                capture_output=True, timeout=5)
+        return await asyncio.to_thread(charge_limit)
 
     async def set_profile(self, profile: str = "balanced", **_: Any) -> str:
         if profile not in PROFILES:
@@ -232,9 +387,18 @@ class Plugin:
         return profile
 
     async def set_rgb(self, mode: str = "static", color: str = "ff3c00", brightness: int = 160, **_: Any) -> dict:
+        rgb = {"mode": mode, "color": color.lstrip("#").lower()[:6],
+               "brightness": max(0, min(255, int(brightness)))}
+        # konkrd's request socket sets the lights without reloading
+        # everything, fast enough to follow a slider.
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+                sock.sendto(f"rgb-set:{rgb['mode']}:{rgb['color']}:{rgb['brightness']}".encode(), REQUEST)
+            return rgb
+        except OSError:
+            pass
         st = load()
-        st["rgb"] = {"mode": mode, "color": color.lstrip("#").lower()[:6],
-                     "brightness": max(0, min(255, int(brightness)))}
+        st["rgb"] = rgb
         save(st)
         return st["rgb"]
 
@@ -252,10 +416,85 @@ class Plugin:
 
     async def set_fan(self, mode: str = "auto", fixed: int = 50, boost: bool = False, **_: Any) -> dict:
         st = load()
-        st["fan"] = {"mode": "fixed" if mode == "fixed" else "auto",
-                     "fixed": max(0, min(100, int(fixed))), "boost": bool(boost)}
+        st["fan"].update(mode="fixed" if mode == "fixed" else "auto",
+                         fixed=max(0, min(100, int(fixed))), boost=bool(boost))
         save(st)
         return st["fan"]
+
+    async def get_games(self, **_: Any) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(installed_games)
+
+    async def set_game_perf(self, appid: int = 0, cfg: Any = None, **_: Any) -> dict[str, Any]:
+        """One game's own performance settings ({} = follow the profile).
+        konkrd applies them while the game runs, at once if it already does."""
+        st = load()
+        games = st.setdefault("perf_games", {})
+        clean = clean_perf(cfg if isinstance(cfg, dict) else {})
+        if int(appid or 0):
+            if clean:
+                games[str(int(appid))] = clean
+            else:
+                games.pop(str(int(appid)), None)
+            save(st)
+        return games
+
+    async def set_charging_fan(self, pct: int = 0, **_: Any) -> dict:
+        st = load()
+        st["fan"]["charging_min"] = max(0, min(60, int(pct)))
+        save(st)
+        return st["fan"]
+
+    async def set_fan_tuning(self, curve: str = "", reaction: str = "calm", stop_below: int = 0,
+                             **_: Any) -> dict:
+        """The curve the fan follows ("" = the profile's, a built-in name or
+        one of the user's), how fast it reacts, and the temperature it may
+        stop under (0 = never)."""
+        st = load()
+        mine = st.get("fan_curves") or {}
+        st["fan"].update(curve=curve if curve in BUILTIN_CURVES or curve in mine else "",
+                         reaction=reaction if reaction in REACTIONS else "calm",
+                         stop_below=0 if not stop_below else max(35, min(70, int(stop_below))))
+        save(st)
+        return st["fan"]
+
+    async def save_fan_curve(self, name: str = "", points: Any = None, **_: Any) -> dict:
+        """Create or update one of the user's curves. Returns all of them."""
+        st = load()
+        mine = st.setdefault("fan_curves", {})
+        name = " ".join(str(name).split())[:24]
+        pts = clean_curve(points or [])
+        reserved = name in BUILTIN_CURVES or name == "global" or name.startswith("fixed-")
+        if name and pts and not reserved and (name in mine or len(mine) < MAX_CURVES):
+            mine[name] = pts
+            save(st)
+        return mine
+
+    async def rename_fan_curve(self, old: str = "", new: str = "", **_: Any) -> dict:
+        st = load()
+        mine = st.setdefault("fan_curves", {})
+        new = " ".join(str(new).split())[:24]
+        reserved = new in BUILTIN_CURVES or new == "global" or new.startswith("fixed-")
+        if old in mine and new and not reserved and new not in mine:
+            mine[new] = mine.pop(old)
+            if st["fan"].get("curve") == old:
+                st["fan"]["curve"] = new
+            for entry in (st.get("fan_games") or {}).values():
+                if entry.get("curve") == old:
+                    entry["curve"] = new
+            save(st)
+        return mine
+
+    async def delete_fan_curve(self, name: str = "", **_: Any) -> dict:
+        st = load()
+        mine = st.setdefault("fan_curves", {})
+        if mine.pop(name, None) is not None:
+            if st["fan"].get("curve") == name:
+                st["fan"]["curve"] = ""
+            for appid, entry in list((st.get("fan_games") or {}).items()):
+                if entry.get("curve") == name:
+                    st["fan_games"].pop(appid)
+            save(st)
+        return mine
 
     async def set_game_fan(self, appid: int = 0, choice: str = "global", **_: Any) -> dict:
         """The running game's own fan setting: "global" (none), a curve
@@ -267,7 +506,7 @@ class Plugin:
             return game_fan_state(st)
         if choice == "global":
             games.pop(str(appid), None)
-        elif choice in ("silent", "balanced", "turbo"):
+        elif choice in BUILTIN_CURVES or choice in (st.get("fan_curves") or {}):
             games[str(appid)] = {"curve": choice}
         elif choice.startswith("fixed-") and choice[6:].isdigit():
             games[str(appid)] = {"mode": "fixed", "fixed": max(0, min(100, int(choice[6:])))}
@@ -303,8 +542,8 @@ class Plugin:
         """Restart into Android: tablets switch back to their Android (ZUXOS or
         ZUI), handhelds restart into the ABL's boot menu."""
         # Gen 5: copy Android's boot image back into boot_a. Gen 4: make slot A active.
-        # Handhelds: restart into ROCKNIX ABL's menu (its boot mode lives in a
-        # UEFI variable Linux can't set).
+        # Handhelds: restart into the ABL's menu. OpenABL keeps its boot mode
+        # in a UEFI variable, out of reach while we boot without EFI.
         if not tablet():
             tool = ["systemctl", "reboot", "--reboot-argument=bootloader"]
         else:

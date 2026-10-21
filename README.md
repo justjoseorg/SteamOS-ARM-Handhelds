@@ -33,7 +33,7 @@
 
 > [!WARNING]
 > This is a community project, not affiliated with or endorsed by Valve.
-> Installing it means flashing the ROCKNIX ABL bootloader, and getting that
+> Installing it means flashing the OpenABL bootloader, and getting that
 > wrong can leave your device unable to boot or lose your data. Back up first
 > and follow the [install guide](https://steamos-arm-port.github.io/getting-started/install/)
 > step by step.
@@ -62,7 +62,7 @@ What you get:
 
 ## Quick start
 
-1. Flash the ROCKNIX ABL bootloader for your SoC, the [ABL guide](https://steamos-arm-port.github.io/getting-started/abl/) walks you through it. Back up your stock ABL first.
+1. Flash the OpenABL bootloader for your SoC (ROCKNIX ABL works too), the [ABL guide](https://steamos-arm-port.github.io/getting-started/abl/) walks you through it. Back up your stock ABL first.
 2. Download the image for your SoC from [Releases](https://github.com/hashtagbasit/SteamOS-ARM-Port/releases/latest), open the `.001` part with 7-Zip and flash the `.img` inside to a microSD card (32 GB+) with balenaEtcher or Rufus.
 3. Boot the card from the ABL menu and pick your device. First boot takes a couple of minutes.
 

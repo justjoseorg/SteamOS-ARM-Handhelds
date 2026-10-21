@@ -58,6 +58,16 @@ CC=/nonexistent DESTDIR="$R" sh "$W/userspace/platform/install.sh" >/dev/null 2>
 rm -f "$R/usr/sbin/back-to-android" "$R"/usr/lib/systemd/system/tb323fu-emergency-key.service \
   "$R"/usr/lib/systemd/system/tb323fu-kernel-confirm.service "$R/usr/libexec/tb323fu/tb323fu-emergency-key" \
   "$R/usr/libexec/tb323fu/tb323fu-kernel-confirm"
+# Their per-install Wi-Fi MAC .link replaces 99-sm8550-wlan0.link and kept
+# the kernel's name wlp1s0; Steam, steamos-manager and our Wi-Fi scripts look
+# for wlan0 (test 3: a saved network wasn't joined again after a restart).
+# Same fixed MAC, our name.
+G="$R/usr/libexec/tb323fu/tb323fu-gen-ids"
+grep -q '^NamePolicy=keep kernel database onboard slot path$' "$G" || die "tb323fu-gen-ids changed upstream"
+sed -i -e 's/^NamePolicy=keep kernel database onboard slot path$/Name=wlan0/' \
+  -e '/^AlternativeNamesPolicy=database onboard slot path$/d' \
+  -e 's/so its naming is repeated here to keep the name wlp1s0\./so it names the card wlan0 as SteamOS expects./' "$G"
+grep -q '^Name=wlan0$' "$G" || die "wlan0 name not set in tb323fu-gen-ids"
 W2="$R/etc/systemd/system"
 mkdir -p "$W2/multi-user.target.wants" "$W2/sysinit.target.wants" "$R/etc/systemd/user/default.target.wants"
 for u in tb323fu-gen-ids tb323fu-btaddr tb323fu-dsp tb323fu-audio tb323fu-usb-port; do

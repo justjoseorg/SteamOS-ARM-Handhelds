@@ -70,7 +70,10 @@ install -Dm0755 $OV/usr/lib/systemd/system-sleep/steamos-arm-sleep-stats $R/usr/
 install -Dm0755 "$OV/usr/lib/systemd/system-sleep/steamos-arm-low-battery" "$R/usr/lib/systemd/system-sleep/steamos-arm-low-battery"
 sed -i -e 's/^PercentageCritical=.*/PercentageCritical=6/' -e 's/^PercentageAction=.*/PercentageAction=4/' \
   -e 's/^CriticalPowerAction=.*/CriticalPowerAction=PowerOff/' "$R/etc/UPower/UPower.conf"
-for u in steamos-arm-tablet-backlight steamos-arm-tablet-boot-watch; do
+# Started by its charger while off: stay dark and charge (the bootloader's
+# androidboot.mode=charger, read from bootconfig).
+install -Dm0755 $OV/usr/lib/steamos-arm/tablet-charger-hold $R/usr/lib/steamos-arm/tablet-charger-hold
+for u in steamos-arm-tablet-backlight steamos-arm-tablet-boot-watch steamos-arm-tablet-charger; do
   install -Dm0644 $OV/usr/lib/systemd/system/$u.service $R/usr/lib/systemd/system/$u.service
   ln -sfn ../$u.service $R/usr/lib/systemd/system/multi-user.target.wants/$u.service
 done
@@ -105,6 +108,10 @@ chroot $R sh -c 'command -v flock && command -v pactl && gpioget --help 2>&1 | g
 grep -q "CPUAffinity=0-7" $R/usr/lib/systemd/user.conf.d/60-sm8550-cpu-affinity.conf && grep -q "0xff" $R/usr/lib/systemd/user/steam.service.d/70-sm8550-cpu-affinity.conf || fail "cpu affinity"
 [ ! -e $R/usr/lib/qt6/plugins/discover/packagekit-backend.so ] || fail "Discover PackageKit backend"
 grep -q "lenovo,baldur" $R/usr/lib/systemd/system/steamos-arm-tablet-boot-watch.service && grep -q "lenovo,baldur" $R/usr/lib/systemd/system/steamos-arm-tablet-backlight.service || fail "boot watch / backlight not for Gen 5"
+grep -q "lenovo,baldur" $R/usr/lib/systemd/system/steamos-arm-tablet-charger.service && [ -x $R/usr/lib/steamos-arm/tablet-charger-hold ] && [ -L $R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-tablet-charger.service ] || fail "charger hold not for Gen 5"
+grep -q " bootconfig\"" $SRC/external-and-mods/kernel-baldur/steamos.config && grep -aq "steamos-gen5-logs bootconfig" $KO/boot/Image || fail "bootconfig not on the kernel command line"
+grep -q "^Name=wlan0$" $R/usr/libexec/tb323fu/tb323fu-gen-ids || fail "Wi-Fi not named wlan0"
+grep -q "def rescan" $R/usr/lib/steamos-arm/gen5-emergency-key || fail "emergency key rescans"
 grep -q host-reconcile $R/usr/libexec/tb323fu/tb323fu-usb-port && [ -f $R/usr/lib/udev/rules.d/71-tb323fu-usb-host.rules ] || fail "USB-C routing"
 grep -q fail_safe $R/usr/libexec/tb323fu/tb323fu-speaker-gain || fail "speaker gain"
 [ -f $R/usr/share/inputplumber/devices/05-lenovo-tb323fu-legion-g9-2026.yaml ] && [ -f $R/usr/share/inputplumber/capability_maps/lenovo_legion_g9_2026.yaml ] || fail "G9 2026"
