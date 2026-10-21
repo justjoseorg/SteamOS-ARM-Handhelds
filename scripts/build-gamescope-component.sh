@@ -13,6 +13,10 @@ git -C "$WORK/upstream" fetch -q --depth 1 https://github.com/ValveSoftware/game
 git -C "$WORK/upstream" checkout -q FETCH_HEAD
 git -C "$WORK/upstream" submodule update -q --init --depth 1 \
     subprojects/wlroots subprojects/libliftoff subprojects/vkroots subprojects/libdisplay-info
+# The vendored WSI layer uses this vkroots API, not the newer compositor snapshot's API.
+git -C "$WORK/upstream/subprojects/vkroots" fetch -q --depth 1 origin \
+    5106d8a0df95de66cc58dc1ea37e69c99afc9540
+git -C "$WORK/upstream/subprojects/vkroots" checkout -q FETCH_HEAD
 mkdir "$WORK/src"
 rsync -a --exclude=.git --exclude=subprojects/ "$SRC/" "$WORK/src/"
 rsync -a --exclude=.git "$WORK/upstream/subprojects/" "$WORK/src/subprojects/"
@@ -38,7 +42,7 @@ luajit "$WORK/src/tests/ayn.odin2.portal.lua" \
 meson setup "$WORK/build" "$WORK/src" \
     --prefix=/usr/local --buildtype=release \
     -Dpipewire=enabled -Dinput_emulation=enabled -Dbenchmark=disabled \
-    -Denable_openvr_support=false -Denable_gamescope_wsi_layer=false \
+    -Denable_openvr_support=false -Denable_gamescope_wsi_layer=true \
     -Dwayland:documentation=false -Dwayland:tests=false \
     -Dlibdrm:auto_features=disabled -Dlibdrm:tests=false \
     -Dlibxkbcommon:enable-tools=false -Dlibxkbcommon:enable-x11=false \
@@ -50,3 +54,11 @@ meson install -C "$WORK/build" --no-rebuild --destdir "$WORK/install"
 
 install -Dm755 "$WORK/install/usr/local/bin/gamescope" "$OUT/gamescope"
 cp -a "$WORK/install/usr/local/share/gamescope/scripts" "$OUT/scripts"
+install -m755 "$WORK/build/layer/libVkLayer_FROG_gamescope_wsi_aarch64.so" "$OUT/"
+python3 - "$WORK/build/layer/VkLayer_FROG_gamescope_wsi.aarch64.json" "$OUT" <<'PY'
+import json, sys
+from pathlib import Path
+manifest = json.loads(Path(sys.argv[1]).read_text())
+manifest["layer"]["library_path"] = "/usr/lib/libVkLayer_FROG_gamescope_wsi_aarch64.so"
+(Path(sys.argv[2]) / "VkLayer_FROG_gamescope_wsi.aarch64.json").write_text(json.dumps(manifest, indent=2) + "\n")
+PY

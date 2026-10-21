@@ -9,6 +9,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "fork/hooks/40-gamescope-sm8550.sh"
 PROFILE = "scripts/00-gamescope/displays/ayn.odin2.portal.lua"
+LAYER = "libVkLayer_FROG_gamescope_wsi_aarch64.so"
+MANIFEST = "VkLayer_FROG_gamescope_wsi.aarch64.json"
 
 
 class GamescopeUpdateTests(unittest.TestCase):
@@ -44,6 +46,8 @@ class GamescopeUpdateTests(unittest.TestCase):
             "gamescope": b"test compositor",
             PROFILE: (ROOT / "external-and-mods/gamescope" / PROFILE).read_bytes(),
             "scripts/00-gamescope/common/util.lua": b"test utility",
+            LAYER: b"test WSI layer",
+            MANIFEST: b"test WSI manifest",
         }
         self.archive(files)
         custom = self.rootfs / "usr/local/share/gamescope/scripts/custom.lua"
@@ -64,6 +68,9 @@ class GamescopeUpdateTests(unittest.TestCase):
         )
         self.assertEqual(session.stat().st_mode & 0o777, 0o755)
         self.assertEqual(custom.read_text(), "existing script")
+        self.assertEqual((self.rootfs / "usr/lib" / LAYER).read_bytes(), files[LAYER])
+        self.assertEqual((self.rootfs / "usr/share/vulkan/implicit_layer.d" / MANIFEST).read_bytes(),
+                         files[MANIFEST])
         self.assertFalse(list(self.work.glob("tmp.*")))
 
     def test_incomplete_component_fails_before_installation(self):
@@ -72,6 +79,9 @@ class GamescopeUpdateTests(unittest.TestCase):
             {PROFILE: b"test profile"},
             {"gamescope": b"", PROFILE: b"test profile"},
             {"gamescope": b"test compositor", PROFILE: b""},
+            {"gamescope": b"test compositor", PROFILE: b"test profile", LAYER: b"test layer"},
+            {"gamescope": b"test compositor", PROFILE: b"test profile",
+             LAYER: b"", MANIFEST: b"test manifest"},
         ):
             with self.subTest(files=files):
                 self.archive(files)

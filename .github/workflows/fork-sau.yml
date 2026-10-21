@@ -21,6 +21,10 @@ on:
         description: Publish a new revision even if this upstream release was already built (use after changing fork/)
         type: boolean
         default: false
+      release_notes:
+        description: Optional release notes (build provenance is appended)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -89,11 +93,14 @@ jobs:
 
       - name: Create draft release
         if: steps.plan.outputs.build == 'true'
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           tag=${{ steps.plan.outputs.tag }}
+          notes="${RELEASE_NOTES:-SteamOS ARM Handhelds ${{ steps.plan.outputs.upstream_tag }} with this fork's changes. Install with SteamOS Update.}"
           gh release delete "$tag" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "${{ github.event.repository.default_branch }}" \
-            --title "$tag" --notes "SteamOS ARM Handhelds ${{ steps.plan.outputs.upstream_tag }} with this fork's changes. Install with SteamOS Update. Built from main@${{ steps.plan.outputs.head }}"
+            --title "$tag" --notes "$notes Built from main@${{ steps.plan.outputs.head }}"
 
   components:
     needs: prepare
@@ -149,10 +156,12 @@ jobs:
           $d -p "${{ needs.components.outputs.ip_name }}"
           $d -p "${{ needs.components.outputs.va_name }}"
           $d -p "${{ needs.components.outputs.gamescope_name }}"
+          $d -p "${{ needs.components.outputs.hdr_name }}"
           mv "$WORK/assets/${{ needs.components.outputs.kernel_name }}" "$WORK/assets/kernel.tar.gz"
           mv "$WORK/assets/${{ needs.components.outputs.ip_name }}" "$WORK/assets/inputplumber"
           mv "$WORK/assets/${{ needs.components.outputs.va_name }}" "$WORK/assets/vaapi.tar.gz"
           mv "$WORK/assets/${{ needs.components.outputs.gamescope_name }}" "$WORK/assets/gamescope.tar.gz"
+          mv "$WORK/assets/${{ needs.components.outputs.hdr_name }}" "$WORK/assets/streaming-hdr.tar.gz"
           echo "FORK_ASSETS=$WORK/assets" >> "$GITHUB_ENV"
 
       - name: Build package

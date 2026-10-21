@@ -16,6 +16,8 @@ on:
         value: ${{ jobs.plan.outputs.va_name }}
       gamescope_name:
         value: ${{ jobs.plan.outputs.gamescope_name }}
+      hdr_name:
+        value: ${{ jobs.plan.outputs.hdr_name }}
   workflow_dispatch:
   push:
     branches: [main]
@@ -27,6 +29,12 @@ on:
       - external-and-mods/v4l2-vaapi/**
       - external-and-mods/gamescope/**
       - scripts/build-gamescope-component.sh
+      - external-and-mods/streaming-hdr/**
+      - scripts/build-streaming-hdr-component.sh
+      - scripts/test-sdl-hdr.py
+      - scripts/test-steam-av1.py
+      - steamos-overlay/usr/lib/steamos/sm8550-streaming-client
+      - steamos-overlay/usr/lib/steamos/sm8550-steam-av1
       - scripts/test-*-update.py
       - fork/hooks/**
       - .github/workflows/fork-components.yml
@@ -45,10 +53,12 @@ jobs:
       ip_name: ${{ steps.p.outputs.ip_name }}
       va_name: ${{ steps.p.outputs.va_name }}
       gamescope_name: ${{ steps.p.outputs.gamescope_name }}
+      hdr_name: ${{ steps.p.outputs.hdr_name }}
       kernel: ${{ steps.p.outputs.kernel }}
       ip: ${{ steps.p.outputs.ip }}
       va: ${{ steps.p.outputs.va }}
       gamescope: ${{ steps.p.outputs.gamescope }}
+      hdr: ${{ steps.p.outputs.hdr }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,6 +67,8 @@ jobs:
         run: |
           python3 scripts/test-av1-update.py
           python3 scripts/test-gamescope-update.py
+          python3 scripts/test-streaming-hdr-update.py
+          python3 scripts/test-steam-av1.py
       - id: p
         run: |
           h() { git ls-files -z "$@" | xargs -0 sha256sum | sha256sum | cut -c1-12; }
@@ -64,15 +76,18 @@ jobs:
           i=$(h external-and-mods/InputPlumber/0001-bound-ayaneo-haptics-polling.patch external-and-mods/InputPlumber/0002-ayaneo-haptics-timed-rumble-and-steam-pulses.patch external-and-mods/InputPlumber/0003-manage-ayn-odin2-imu-uhid.patch external-and-mods/InputPlumber/0004-pmic-haptics-rumble-as-flat-constant.patch scripts/build-inputplumber-konkr.sh)
           v=$(h external-and-mods/v4l2-vaapi)
           g=$(h external-and-mods/gamescope scripts/build-gamescope-component.sh)
+          s=$(h external-and-mods/streaming-hdr scripts/build-streaming-hdr-component.sh scripts/test-sdl-hdr.py external-and-mods/gamescope/scripts/00-gamescope/displays/ayn.odin2.portal.lua)
           echo "kernel_name=kernel-sm8550-$k.tar.gz" >> "$GITHUB_OUTPUT"
           echo "ip_name=inputplumber-$i" >> "$GITHUB_OUTPUT"
           echo "va_name=v4l2-vaapi-arm64-$v.tar.gz" >> "$GITHUB_OUTPUT"
           echo "gamescope_name=gamescope-arm64-$g.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "hdr_name=streaming-hdr-x86_64-$s.tar.gz" >> "$GITHUB_OUTPUT"
           have=$(gh release view fork-assets -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
           grep -qx "kernel-sm8550-$k.tar.gz" <<<"$have" && echo "kernel=false" >> "$GITHUB_OUTPUT" || echo "kernel=true" >> "$GITHUB_OUTPUT"
           grep -qx "inputplumber-$i" <<<"$have" && echo "ip=false" >> "$GITHUB_OUTPUT" || echo "ip=true" >> "$GITHUB_OUTPUT"
           grep -qx "v4l2-vaapi-arm64-$v.tar.gz" <<<"$have" && echo "va=false" >> "$GITHUB_OUTPUT" || echo "va=true" >> "$GITHUB_OUTPUT"
           grep -qx "gamescope-arm64-$g.tar.gz" <<<"$have" && echo "gamescope=false" >> "$GITHUB_OUTPUT" || echo "gamescope=true" >> "$GITHUB_OUTPUT"
+          grep -qx "streaming-hdr-x86_64-$s.tar.gz" <<<"$have" && echo "hdr=false" >> "$GITHUB_OUTPUT" || echo "hdr=true" >> "$GITHUB_OUTPUT"
 
   kernel:
     needs: plan
@@ -191,7 +206,7 @@ jobs:
             gcc-14 g++-14 meson ninja-build pkg-config git rsync cmake \
             python3-jinja2 python3-pyparsing glslang-tools luajit catch2 xwayland \
             libx11-dev libxdamage-dev libxcomposite-dev libxcursor-dev libxrender-dev \
-            libxext-dev libxfixes-dev libxxf86vm-dev libxtst-dev libxres-dev libxmu-dev libxi-dev \
+            libxext-dev libxfixes-dev libxxf86vm-dev libxtst-dev libxres-dev libxmu-dev libxi-dev libx11-xcb-dev libglm-dev \
             libxcb-composite0-dev libxcb-icccm4-dev libxcb-render-util0-dev libxcb-res0-dev \
             libxcb-ewmh-dev libxcb-xinput-dev libxcb-xfixes0-dev \
             libwayland-dev wayland-protocols libvulkan-dev libdrm-dev libxkbcommon-dev \
@@ -203,14 +218,44 @@ jobs:
       - name: Package
         run: |
           readelf -h out/gamescope | grep -q 'Machine:.*AArch64'
-          tar -czf gamescope.tar.gz -C out gamescope scripts
+          readelf -h out/libVkLayer_FROG_gamescope_wsi_aarch64.so | grep -q 'Machine:.*AArch64'
+          tar -czf gamescope.tar.gz -C out gamescope scripts \
+            libVkLayer_FROG_gamescope_wsi_aarch64.so VkLayer_FROG_gamescope_wsi.aarch64.json
       - uses: actions/upload-artifact@v4
         with:
           name: gamescope
           path: gamescope.tar.gz
 
+  streaming-hdr:
+    needs: plan
+    if: needs.plan.outputs.hdr == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake ninja-build pkg-config curl patch \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libxtst-dev libxkbcommon-dev \
+            libdrm-dev libudev-dev libdbus-1-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev
+      - name: Build and check
+        run: OUT="$GITHUB_WORKSPACE/out" bash scripts/build-streaming-hdr-component.sh
+      - name: Package
+        run: tar -czf streaming-hdr.tar.gz -C out libSDL3.so.0 manifest.json LICENSE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: streaming-hdr
+          path: streaming-hdr.tar.gz
+
   publish:
-    needs: [plan, kernel, inputplumber, vaapi, gamescope]
+    needs: [plan, kernel, inputplumber, vaapi, gamescope, streaming-hdr]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     steps:
@@ -223,3 +268,4 @@ jobs:
           [ ! -f art/inputplumber/inputplumber-0.81.0-konkr ] || { mv art/inputplumber/inputplumber-0.81.0-konkr "art/inputplumber/${{ needs.plan.outputs.ip_name }}"; gh release upload fork-assets "art/inputplumber/${{ needs.plan.outputs.ip_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
           [ ! -f art/vaapi/vaapi.tar.gz ] || { mv art/vaapi/vaapi.tar.gz "art/vaapi/${{ needs.plan.outputs.va_name }}"; gh release upload fork-assets "art/vaapi/${{ needs.plan.outputs.va_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
           [ ! -f art/gamescope/gamescope.tar.gz ] || { mv art/gamescope/gamescope.tar.gz "art/gamescope/${{ needs.plan.outputs.gamescope_name }}"; gh release upload fork-assets "art/gamescope/${{ needs.plan.outputs.gamescope_name }}" -R "$GITHUB_REPOSITORY" --clobber; }
+          [ ! -f art/streaming-hdr/streaming-hdr.tar.gz ] || { mv art/streaming-hdr/streaming-hdr.tar.gz "art/streaming-hdr/${{ needs.plan.outputs.hdr_name }}"; gh release upload fork-assets "art/streaming-hdr/${{ needs.plan.outputs.hdr_name }}" -R "$GITHUB_REPOSITORY" --clobber; }

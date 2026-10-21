@@ -20,6 +20,21 @@ upstream main    ──► fork-sync.yml ──► merged into main
 Only `/usr`, `/opt`, `/etc` (minus accounts, `ssh`, etc.), the kernel and the two Decky plugins are shipped by updates,
 so changes must land there. Anything under `/etc/ssh` is deliberately preserved by the updater, hence SSH is enabled via `/usr`.
 
+## Portal HDR streaming
+
+The SM8550 update includes a patched Gamescope WSI layer and a separate x86 SDL
+for the Portal's existing `.pyrowave-box64` streaming opt-in. Native Steam's SDL
+is not replaced. At each stream launch, the helper checks the board, the stock
+Steam SDL fingerprint, the packaged SDL checksum and an AV1 P010 VA-API config.
+An incompatible Steam update keeps the stock SDL and reports the reason in
+`streaming_client_box64.log`. Create `.no-hdr-box64` in the Steam directory to
+disable this override.
+
+The SDL build uses the Portal profile's factory peak and Gamescope's current SDR
+white level, only while HDR is active on the internal display. Host HDR currently
+needs **Custom / enabled**; **Match client** did not negotiate ten-bit video in
+the tested setup. This does not add a Spout toggle or 4:4:4 support.
+
 ## Versions
 
 Release `vX.Y.Z.N` is upstream `vX.Y.Z` revision `N`. A new upstream release starts at `.1`; run
