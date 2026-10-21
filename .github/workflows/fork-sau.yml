@@ -148,9 +148,11 @@ jobs:
           $d -p "${{ needs.components.outputs.kernel_name }}"
           $d -p "${{ needs.components.outputs.ip_name }}"
           $d -p "${{ needs.components.outputs.va_name }}"
+          $d -p "${{ needs.components.outputs.gamescope_name }}"
           mv "$WORK/assets/${{ needs.components.outputs.kernel_name }}" "$WORK/assets/kernel.tar.gz"
           mv "$WORK/assets/${{ needs.components.outputs.ip_name }}" "$WORK/assets/inputplumber"
           mv "$WORK/assets/${{ needs.components.outputs.va_name }}" "$WORK/assets/vaapi.tar.gz"
+          mv "$WORK/assets/${{ needs.components.outputs.gamescope_name }}" "$WORK/assets/gamescope.tar.gz"
           echo "FORK_ASSETS=$WORK/assets" >> "$GITHUB_ENV"
 
       - name: Build package
