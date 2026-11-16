@@ -1,4 +1,4 @@
-# Official SteamOS extract / packed images (Valve; do not publish)
+# Official SteamOS extract / packed images (do not publish)
 /rootfs/
 /rootfs.img
 /steamos-sm8550.img
@@ -30,7 +30,15 @@
 /artifact_manifest.txt
 /bindings/
 /man/
-/tests/
+/tests/*
+!/tests/test_installer_backend.py
+!/tests/test_button_remap.py
+!/tests/test_input_sleep.py
+!/tests/test_overlay_checks.py
+!/tests/test_space_guard.py
+!/tests/test_logs.py
+!/tests/test_update_preserve.py
+!/tests/test_thor_panels.py
 /.version
 
 # Kernel build output
@@ -58,7 +66,7 @@ __pycache__/
 /external-and-mods/InputPlumber/libiio-src/
 /external-and-mods/InputPlumber/*.tar.gz
 
-# Valve Steam ARM client zips (fetch at image-build time)
+# Steam ARM client zips (fetch at image-build time)
 /external-and-mods/steam-client-arm64/
 
 # Decky / Node

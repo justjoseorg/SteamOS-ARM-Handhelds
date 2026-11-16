@@ -242,6 +242,7 @@ install -m 0644 "$OVL/etc/skel/Desktop/Return.desktop" \
 install -m 0755 "$OVL/etc/xdg/plasma-workspace/env/set-return-icon.sh" \
   "$R/etc/xdg/plasma-workspace/env/set-return-icon.sh"
 persist_etc "skel/Desktop/Return.desktop" "$OVL/etc/skel/Desktop/Return.desktop" 0644
+persist_etc "skel/Desktop/Record Logs.desktop" "$OVL/etc/skel/Desktop/Record Logs.desktop" 0644
 persist_etc "xdg/plasma-workspace/env/set-return-icon.sh" \
   "$OVL/etc/xdg/plasma-workspace/env/set-return-icon.sh" 0755
 install -m 0644 "$OVL/usr/share/icons/hicolor/scalable/apps/steamos-gamemode.svg" \
@@ -251,6 +252,8 @@ install -m 0644 "$OVL/etc/skel/Desktop/Return.desktop" \
 mkdir -p "$HOME_DST/Desktop"
 install -m 0755 "$OVL/etc/skel/Desktop/Return.desktop" \
   "$HOME_DST/Desktop/Return.desktop"
+install -m 0755 "$OVL/etc/skel/Desktop/Record Logs.desktop" \
+  "$HOME_DST/Desktop/Record Logs.desktop"
 rm -f "$HOME_DST/Desktop/Decky Loader.desktop" \
       "$HOME_DST/Desktop/install-decky.desktop"
 
@@ -268,7 +271,7 @@ if [[ -f "$OVL/etc/xdg/powerdevilrc" ]]; then
   install -m 0644 "$OVL/etc/xdg/powerdevilrc" "$R/etc/skel/.config/powerdevilrc"
 fi
 
-# Official Plasma kscreen KCM is installed by build-kscreen-6.2.5.sh
+# Official Plasma kscreen KCM is installed by build-kde-extras-in-rootfs.sh
 # Do not ship a fake Display Configuration menu.
 
 # Branch selector (rel + beta + preview, no atomupd)

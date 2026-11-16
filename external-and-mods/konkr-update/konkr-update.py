@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage and recover offline SteamOS updates. Runs recovery from a private HOME root.
+"""Stage and recover offline Zaviya updates. Runs recovery from a private HOME root.
 No partitioning or formatting commands are used. Games and Steam account data are excluded.
 """
 from __future__ import annotations
@@ -38,7 +38,10 @@ UPPER = 'var/lib/overlays/etc/upper'
 HOME_DIRS = ('homebrew/plugins/konkr-control', 'homebrew/plugins/decky-lsfg-vk')
 PRESERVE = ('passwd', 'shadow', 'group', 'gshadow', 'machine-id', 'hostname', 'hosts',
             'fstab', 'crypttab', 'localtime', 'adjtime', 'resolv.conf', 'ssh',
-            'NetworkManager/system-connections', 'sudoers.d')
+            'NetworkManager/system-connections', 'sudoers.d',
+            # a user's `systemctl enable sshd` must survive an update
+            'systemd/system/multi-user.target.wants/sshd.service',
+            'systemd/system/sockets.target.wants/sshd.socket')
 PENDING = 'var/lib/konkr-update/pending'
 
 
@@ -229,7 +232,7 @@ def verify_signature(manifest_path, sig_path, pub=SIGNING_KEY):
         raise ValueError('update signature does not verify: not an official release')
 
 
-BOOTIMG = Path('/usr/share/easy-ufs-install/ufs-bootimg.py')
+BOOTIMG = Path('/usr/share/zaviya-install/ufs-bootimg.py')
 
 
 def bootimg_helper(payload=None):
@@ -328,9 +331,9 @@ def stage(args):
     if os.geteuid() != 0: raise ValueError('staging needs administrator access')
     model = Path('/sys/firmware/devicetree/base/model').read_text().rstrip('\0\n')
     if model not in SUPPORTED_MODELS: raise ValueError('unsupported device')
-    if os.uname().machine != 'aarch64': raise ValueError('requires ARM64 SteamOS')
+    if os.uname().machine != 'aarch64': raise ValueError('requires ARM64 Zaviya')
     import pwd
-    if pwd.getpwnam('steamos').pw_uid != 1000: raise ValueError('unsupported SteamOS account layout')
+    if pwd.getpwnam('steamos').pw_uid != 1000: raise ValueError('unsupported account layout')
     source_package = Path(args.package).resolve()
     expected = (args.sha256 or '').lower()
     if expected and not re.fullmatch('[0-9a-f]{64}', expected): raise ValueError('invalid expected SHA256')
@@ -392,6 +395,18 @@ def stage(args):
         raise
 
 
+def staged_ready():
+    """The marker is written before the boot image, so it alone does not mean
+    the update can be installed by a restart: the new boot image must be in."""
+    pending = Path('/' + PENDING)
+    if not pending.exists(): return False
+    nxt = Path('/home/.konkr-updates') / pending.read_text().strip() / 'next-KERNEL'
+    try:
+        return not nxt.exists() or digest(nxt) == digest('/boot/KERNEL')
+    except OSError:
+        return False
+
+
 def install_kernel(src, boot):
     temp = boot / 'KERNEL.new'
     shutil.copyfile(src, temp)
@@ -399,6 +414,9 @@ def install_kernel(src, boot):
     if digest(temp) != digest(src): raise ValueError('boot copy checksum mismatch')
     os.replace(temp, boot / 'KERNEL')
     (boot / 'KERNEL.md5').write_text(hashlib.md5((boot / 'KERNEL').read_bytes()).hexdigest() + '  KERNEL\n')
+    # EFI files for newer OpenABL. The boot service retries if this fails.
+    try: subprocess.run(['/usr/lib/steamos-arm/kernel-efi-sync', '--boot', str(boot), '--force'], check=False, timeout=120)
+    except (OSError, subprocess.TimeoutExpired): pass
     os.sync()
 
 
@@ -562,7 +580,7 @@ def make_plan(target, root, home, boot):
     return plan
 
 
-# Settings files our own daemons rewrite from Handheld Control (konkrd puts
+# Settings files our own daemons rewrite from Zaviya Control (konkrd puts
 # the Pocket FIT's front buttons on controller buttons in this map, issue #64).
 # A release only changes one together with its blob; without the blob the
 # device's copy is the user's setting and stays.
@@ -939,7 +957,7 @@ def main():
             # The device's own model decides the SoC (the REDMAGIC 6 shares this
             # rootfs but no update package fits it, so it gets none).
             print(json.dumps({'version': rel.get('version', ''), 'soc': this_soc(),
-                              'staged': Path('/' + PENDING).exists()}))
+                              'staged': staged_ready()}))
         else:
             m, size = validate_archive(a.package); print(json.dumps({'version': m['version'], 'bytes': size}, indent=2))
     except Exception as e:

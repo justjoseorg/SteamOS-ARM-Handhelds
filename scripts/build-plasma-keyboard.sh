@@ -7,6 +7,19 @@
 # Later releases need KF6 >= 6.22; the Frame has 6.14. Maliit is Qt5-only.
 set -euo pipefail
 
+# CMake randomly misses a package that is there, about one configure in six.
+# Repeat with --fresh: a miss stays in the cache and would fail every retry.
+retry_cfg() {
+  local i
+  "$@" && return 0
+  for i in 2 3 4 5 6; do
+    echo "configure failed, try $i" >&2
+    sleep 5
+    "$@" --fresh && return 0
+  done
+  return 1
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 R="$(cd "${1:-${ROOT}/rootfs}" && pwd)"
@@ -26,9 +39,12 @@ fi
 # The 8 Elite rootfs has no extra-cmake-modules (the 8 Gen 3 one does).
 if [[ ! -f "$R/usr/share/ECM/cmake/ECMConfig.cmake" ]]; then
   echo "==> installing extra-cmake-modules into rootfs"
-  ECM_PKG="${ECM_PKG:-/tmp/extra-cmake-modules-6.30.0-1-any.pkg.tar.xz}"
-  [[ -f "$ECM_PKG" ]] || curl -fsSL --max-time 60 -o "$ECM_PKG" \
-    "http://mirror.archlinuxarm.org/aarch64/extra/extra-cmake-modules-6.30.0-1-any.pkg.tar.xz"
+  ECM_REPO=http://mirror.archlinuxarm.org/aarch64/extra
+  curl -fsSL --max-time 60 -o "$TOP/extra.db" "$ECM_REPO/extra.db"
+  ECM_FILE="$(tar -xOf "$TOP/extra.db" --wildcards 'extra-cmake-modules-*/desc' \
+    | grep -m1 '^extra-cmake-modules-.*\.pkg\.tar')"
+  ECM_PKG="$TOP/$ECM_FILE"
+  [[ -f "$ECM_PKG" ]] || curl -fsSL --max-time 60 -o "$ECM_PKG" "$ECM_REPO/$ECM_FILE"
   tmp="$(mktemp -d)"
   tar -C "$tmp" -xf "$ECM_PKG"
   mkdir -p "$R/usr/share"
@@ -42,7 +58,7 @@ run_in_rootfs() {
     --unshare-pid --die-with-parent --chdir /tmp "$@"
 }
 rm -rf "$BUILD"
-run_in_rootfs /usr/bin/cmake -S "$SRC" -B "$BUILD" -G Ninja \
+retry_cfg run_in_rootfs /usr/bin/cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
   -DBUILD_TESTING=OFF
 run_in_rootfs /usr/bin/cmake --build "$BUILD" -j"$(nproc)"

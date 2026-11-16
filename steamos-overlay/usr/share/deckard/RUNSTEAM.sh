@@ -79,7 +79,9 @@ fi
 # Then index.html paints and never pulls libraries.js (no Gamepad window).
 htmlcache="${STEAMROOT}/config/htmlcache"
 is_odin3=0
-if grep -aqE "ayn,odin3|qcom,sm8750" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
+# Lenovo tablets are SM8750 too, but not handhelds: no Odin 3 pad, scale or wpa_supplicant.
+if grep -aqE "ayn,odin3|qcom,sm8750" /sys/firmware/devicetree/base/compatible 2>/dev/null &&
+   ! grep -aqE "lenovo,(elden|baldur)" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
   is_odin3=1
 fi
 if [[ "$is_odin3" -eq 1 ]]; then
@@ -299,5 +301,11 @@ cd ${STEAMROOT}
 mkdir -p "${HOME}/.local/share/Steam/logs"
 # Steam refuses LD_PRELOAD (unsafe unsetenv) and aborts its own startup UI.
 unset LD_PRELOAD || true
+
+# On a card or USB drive the library gets a "Zaviya Installer" entry; on internal
+# storage any such entry is removed. Never blocks Steam.
+if [[ -f /usr/share/zaviya-install/seed-installer-shortcut.py ]]; then
+  env -u LD_LIBRARY_PATH -u LD_PRELOAD python3 /usr/share/zaviya-install/seed-installer-shortcut.py >/dev/null 2>&1 || true
+fi
 
 exec "${STEAM_COMMAND[@]}" >"${HOME}/.local/share/Steam/logs/steam_output.log" 2>&1

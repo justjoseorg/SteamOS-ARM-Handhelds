@@ -12,7 +12,7 @@ OVL="${ROOT}/steamos-overlay"
 SM8750_OVL="${ROOT}/sm8750-overlay"
 # KREL from KOUT's dir name (as apply-overlays.sh does), not hardcoded: the
 # from-source kernel self-reports "7.2.0-sm8750-steamos", not "7.2.0".
-KOUT="$(readlink -f "${KERNEL_OUT:-${WORKDIR}/kernel-sm8750-release/7.2.0}")"
+KOUT="$(readlink -f "${KERNEL_OUT:-${WORKDIR}/kernel-sm8750/output/current}")"
 KREL="$(basename "$KOUT")"
 STOCK="${R}/opt/stock-steamos"
 MESA_SO="${SM8750_MESA_SO:-${SM8750_OVL}/usr/lib/libvulkan_freedreno.so}"
@@ -94,11 +94,11 @@ ONLY_UFS=1 STEAMOS_HOME="$R/home/steamos" "${ROOT}/scripts/install-vendor-apps.s
 # Merge SM8750 firmware
 cp -a "$KOUT/firmware/." "$R/usr/lib/firmware/"
 # The Odin 3's audio topology with DisplayPort (external-and-mods/audio-topology;
-# the Pocket FIT Elite's from ROCKNIX already has it).
+# the Pocket FIT Elite's already has it).
 install_file "${ROOT}/external-and-mods/audio-topology/sm8750/SM8750-AYN-tplg.bin" \
   "$R/usr/lib/firmware/qcom/sm8750/SM8750-AYN-tplg.bin" 0644
 
-# Bluetooth and display settings pages for Desktop Mode (not in Valve's repos).
+# Bluetooth and display settings pages for Desktop Mode (not in the stock repos).
 "${SCRIPT_DIR}/install-kde-extras.sh" "$R"
 
 # ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ install_file "$OVL/usr/lib/systemd/user/sm8550-plasma-env.service" \
   "$R/usr/lib/systemd/user/sm8550-plasma-env.service" 0644
 
 # System update hooks, same as the 8 Gen 2/3 images: this image has no A/B
-# partitions or RAUC payload, so Valve's steamos-update failed with "Update
+# partitions or RAUC payload, so the stock steamos-update failed with "Update
 # error" in Steam (Odin 3 tester). Ours reports up to date.
 backup "$R/usr/bin/steamos-update" "$STOCK/usr/bin/steamos-update"
 install_file "$OVL/usr/bin/steamos-update" "$R/usr/bin/steamos-update" 0755
@@ -224,7 +224,7 @@ mkdir -p "$R/etc/systemd/system/multi-user.target.wants"
 ln -sfn /usr/lib/systemd/system/steamos-sm8550-expand-home.service \
   "$R/etc/systemd/system/multi-user.target.wants/steamos-sm8550-expand-home.service"
 
-# VR crash services cleanup (disable Valve Headset daemons)
+# VR crash services cleanup (disable the VR headset daemons)
 for svc in \
   vrcompositor.service vrserver.service steamos-headset-adb.service \
   steamos-headset-adb.path steamos-headset-usb-gadget.service \
@@ -241,7 +241,8 @@ for svc in \
   usb-gadget-init.service 'usb-ncm-gadget@.service' \
   'usb-ncm-dnsmasq@.service' 'usb-ncm-gadget@usb0.service' \
   'usb-ncm-dnsmasq@usb0.service' \
-  steamos-boot.service efi.mount esp.mount systemd-repart.service
+  steamos-boot.service efi.mount esp.mount systemd-repart.service \
+  home-swapfile.swap swapfile.service
 do
   # The last four, as on the other chips (apply-overlays.sh): steamos-boot
   # needs efi.mount, which waits 90 s for the Deck's EFI partition
@@ -418,8 +419,8 @@ if [[ "$KERNEL_HAS_TRACEFS" == 1 ]]; then
 fi
 
 # Our own Mesa (scripts/build-mesa.sh, MESA_STACK=/work/mesa/out): the same
-# 26.2.3 stack as the 8 Gen 2 image, with the Adreno 830 ids added (patches/
-# 0003). Replaces Valve's whole Mesa natively, in the FEX guest and for
+# 26.2.7 stack as the 8 Gen 2 image, with the Adreno 830 ids added (patches/
+# 0003). Replaces the stock whole Mesa natively, in the FEX guest and for
 # Lepton, so Turnip and zink always match. Goes after the overlay copy above,
 # which may carry a standalone Turnip .so.
 if [[ -n "${MESA_STACK:-}" ]]; then
@@ -432,7 +433,11 @@ if [[ -n "${MESA_STACK:-}" ]]; then
     || die "MESA_STACK Turnip doesn't know the Adreno 830"
   ANDROID_VENDOR="usr/share/guestos/android/vendor/lib64"
   PDB="$R/usr/lib/holo/pacmandb/local"
-  for pkg in deckard-mesa-linux-aarch64 deckard-mesa-linux-x86_64 deckard-mesa-android-aarch64; do
+  # KEEP_ANDROID_MESA=1 (tablets): Android keeps the stock Mesa, as on the
+  # 8 Gen 3 where ours crashed its display service.
+  MESA_PKGS="deckard-mesa-linux-aarch64 deckard-mesa-linux-x86_64"
+  [[ "${KEEP_ANDROID_MESA:-0}" = 1 ]] || MESA_PKGS+=" deckard-mesa-android-aarch64"
+  for pkg in $MESA_PKGS; do
     list="$(ls -d "$PDB/${pkg}"-[0-9]*/files 2>/dev/null | head -1)"
     [[ -n "$list" ]] || continue
     grep -v -e '^%' -e '/$' "$list" | grep -E '(\.so[.0-9]*|\.json)$' \
@@ -448,6 +453,13 @@ if [[ -n "${MESA_STACK:-}" ]]; then
   GUEST="$R/usr/share/guestos/fex-mesa"
   cp -a "$MESA_STACK/aarch64/usr/lib/." "$R/usr/lib/"
   cp -a "$MESA_STACK/aarch64/usr/share/." "$R/usr/share/"
+  # The stack must have been built against this rootfs's base: a library it
+  # needs under another soname leaves the image without a Vulkan driver.
+  for lib in "$R/usr/lib/libvulkan_freedreno.so" "$R"/usr/lib/libgallium-*.so; do
+    for need in $(readelf -d "$lib" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+      [[ -e "$R/usr/lib/$need" ]] || die "$(basename "$lib") needs $need, which this rootfs does not have: rebuild Mesa inside a rootfs of the same base"
+    done
+  done
   cp -a "$MESA_STACK/x86_64/usr/lib/." "$GUEST/usr/lib/"
   cp -a "$MESA_STACK/x86_64/usr/share/." "$GUEST/usr/share/"
   cp -a "$MESA_STACK/i386/usr/lib32/." "$GUEST/usr/lib32/"
@@ -457,7 +469,7 @@ if [[ -n "${MESA_STACK:-}" ]]; then
   # the wrapper leaves the system Turnip alone.
   rm -f "$R/usr/share/steamos-sm8650/frame-turnip_icd.aarch64.json"
   rm -rf "$R/usr/lib/steamos-sm8650/frame-turnip"
-  if [[ -f "$MESA_STACK/android/$ANDROID_VENDOR/hw/vulkan.freedreno.so" ]]; then
+  if [[ "${KEEP_ANDROID_MESA:-0}" != 1 && -f "$MESA_STACK/android/$ANDROID_VENDOR/hw/vulkan.freedreno.so" ]]; then
     mkdir -p "$R/$ANDROID_VENDOR"
     cp -a "$MESA_STACK/android/$ANDROID_VENDOR/." "$R/$ANDROID_VENDOR/"
     chown -R root:root "$R/$ANDROID_VENDOR"
@@ -565,35 +577,44 @@ log "== home/steamos setup"
 HOME_DST="${STEAMOS_HOME:-$R/home/steamos}"
 mkdir -p "$HOME_DST/.cache" "$HOME_DST/.config" "$HOME_DST/homebrew/services"
 
-# v3.2.9's bundled Python is missing http.server, socketserver and
-# configparser, so plugin backends that import them die at startup
-# (SteamGridDB). Fixed in v3.2.10 (decky-loader #968/#970).
-DECKY_VERSION=v3.2.10-pre1
-DECKY_LOADER="${MOD}/Decky/loader/PluginLoader-${DECKY_VERSION}"
+# Decky 3.3.0 bundles Python 3.14 and box64 cannot load its _ssl module, so the
+# x86 loader crash-loops. Decky now publishes a native aarch64 build: run that
+# directly, no box64. Pinned to a tested release and checked against the
+# sha256 GitHub publishes for the asset.
+DECKY_VERSION=v3.3.0
+DECKY_SHA256=8ef5dcf36cbbbb6e97201a6baed5d79c4cc44ec27789fc9af1c5b6ae8f0b25b6
+DECKY_LOADER="${MOD}/Decky/loader/PluginLoader-arm64-${DECKY_VERSION}"
+if [[ -s "$DECKY_LOADER" ]] && ! echo "${DECKY_SHA256}  ${DECKY_LOADER}" | sha256sum -c --status; then
+  rm -f "$DECKY_LOADER"
+fi
 if [[ ! -s "$DECKY_LOADER" ]]; then
   mkdir -p "${DECKY_LOADER%/*}"
   curl -fL -o "$DECKY_LOADER.part" \
-    "https://github.com/SteamDeckHomebrew/decky-loader/releases/download/${DECKY_VERSION}/PluginLoader" &&
+    "https://github.com/SteamDeckHomebrew/decky-loader/releases/download/${DECKY_VERSION}/PluginLoader-arm64" &&
     mv "$DECKY_LOADER.part" "$DECKY_LOADER"
 fi
-[[ -s "$DECKY_LOADER" ]] || die "Decky loader ${DECKY_VERSION} missing and download failed"
-# Decky's PluginLoader is x86-64, so the unit runs it through box64
-# (make-steamos-sm8750.sh builds it into the rootfs). Beta 2 only had the
-# wants link, pointing at a unit that was never installed: no Decky, so no
-# Handheld Control either.
-[[ -x "$R/usr/local/bin/box64" ]] || die "box64 missing from the rootfs (Decky needs it)"
+[[ -s "$DECKY_LOADER" ]] || die "Decky loader ${DECKY_VERSION} (arm64) missing and download failed"
+echo "${DECKY_SHA256}  ${DECKY_LOADER}" | sha256sum -c --status \
+  || die "Decky loader ${DECKY_VERSION} sha256 mismatch"
+# Beta 2 only had the wants link, pointing at a unit that was never
+# installed: no Decky, so no Zaviya Control either.
 mkdir -p "$HOME_DST/homebrew/settings" "$HOME_DST/homebrew/data" "$HOME_DST/homebrew/logs"
 install -m0755 "$DECKY_LOADER" "$HOME_DST/homebrew/services/PluginLoader"
+# Same binary in /usr: decky-plugin-fixes uses it to repair installs whose
+# ~/homebrew still has the x86 loader (updates can't write the home folder).
+mkdir -p "$R/usr/share/steamos-arm/decky"
+install -m0755 "$DECKY_LOADER" "$R/usr/share/steamos-arm/decky/PluginLoader-arm64"
+printf '%s' "$DECKY_VERSION" >"$R/usr/share/steamos-arm/decky/PluginLoader-arm64.version"
 printf '%s' "$DECKY_VERSION" >"$HOME_DST/homebrew/services/.loader.version"
 install_file "${ROOT}/sm8650-overlay/usr/lib/systemd/system/plugin_loader.service" \
   "$R/usr/lib/systemd/system/plugin_loader.service" 0644
 mkdir -p "$R/usr/lib/systemd/system/multi-user.target.wants"
 ln -sfn ../plugin_loader.service "$R/usr/lib/systemd/system/multi-user.target.wants/plugin_loader.service"
-# Updating Decky writes its own unit to /etc (runs the x86 binary without
-# box64); this drop-in keeps box64 in front whatever unit file wins.
+# Updating Decky writes its own unit to /etc; this drop-in keeps our native
+# arm64 ExecStart and environment whatever unit file wins.
 install_file "$OVL/usr/lib/systemd/system/plugin_loader.service.d/50-steamos-arm-box64.conf" \
   "$R/usr/lib/systemd/system/plugin_loader.service.d/50-steamos-arm-box64.conf" 0644
-# Handheld Control: profiles, fan and stick lighting in Quick Access (talks
+# Zaviya Control: profiles, fan and stick lighting in Quick Access (talks
 # to odin3d here, konkrd on the other images).
 HC_SRC="${MOD}/Decky/sm8650/konkr-control"
 HC_DST="$HOME_DST/homebrew/plugins/konkr-control"
@@ -644,6 +665,8 @@ install_file "$OVL/usr/share/steamos-odin/plugin_loader.service.d/fast-stop.conf
 chown -R 1000:1000 "$HOME_DST/homebrew"
 # Loadout: emulators, PC game stores and apps (engine + Decky plugin).
 "${SCRIPT_DIR}/install-hub.sh" "$R" "$HOME_DST"
+"${SCRIPT_DIR}/install-branding.sh" "$R"
+"${SCRIPT_DIR}/install-webhelper-acquire-layer.sh" "$R"
 
 # GPU/GMU hang dumps kept past the kernel's five minutes (debug-logs copies them).
 install_file "$OVL/usr/lib/steamos-arm/save-devcoredump" "$R/usr/lib/steamos-arm/save-devcoredump" 0755
@@ -665,6 +688,16 @@ install_file "$OVL/usr/lib/systemd/system/steamos-arm-vpower.service" \
   "$R/usr/lib/systemd/system/steamos-arm-vpower.service" 0644
 mkdir -p "$R/usr/lib/systemd/system/multi-user.target.wants"
 ln -sfn ../steamos-arm-vpower.service "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-vpower.service"
+# Nearly full storage: clear rebuildable caches before the session starts,
+# otherwise Steam fails at once and the session restarts in a loop.
+install_file "$OVL/usr/lib/steamos-arm/steamos-arm-space-guard" "$R/usr/lib/steamos-arm/steamos-arm-space-guard" 0755
+install_file "$OVL/usr/lib/systemd/system/steamos-arm-space-guard.service" \
+  "$R/usr/lib/systemd/system/steamos-arm-space-guard.service" 0644
+ln -sfn ../steamos-arm-space-guard.service "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-space-guard.service"
+# Log recorder (Game Mode button in the Decky plugin, Desktop Mode icon).
+install_file "$OVL/usr/lib/steamos-arm/steamos-arm-logs" "$R/usr/lib/steamos-arm/steamos-arm-logs" 0755
+install_file "$OVL/usr/lib/steamos-arm/steamos-arm-logs-gui" "$R/usr/lib/steamos-arm/steamos-arm-logs-gui" 0755
+ln -sfn ../lib/steamos-arm/steamos-arm-logs "$R/usr/bin/zaviya-logs"
 # Desktop Mode: restart the portal if it came up before the Desktop's
 # environment (Steam's right-stick mouse needs its KDE back end).
 install_file "$OVL/usr/lib/steamos-arm/desktop-portal-fix" "$R/usr/lib/steamos-arm/desktop-portal-fix" 0755
@@ -674,12 +707,24 @@ install_file "$OVL/etc/xdg/autostart/steamos-arm-desktop-portal-fix.desktop" \
 # that stages an update, the polkit rule letting the user start only that,
 # and the key update packages are signed with.
 install_file "$OVL/usr/lib/steamos-arm/update-agent" "$R/usr/lib/steamos-arm/update-agent" 0755
+# EFI boot files next to KERNEL, for OpenABL after 1.2.
+install_file "$OVL/usr/lib/steamos-arm/kernel-efi-sync" "$R/usr/lib/steamos-arm/kernel-efi-sync" 0755
+install_file "$OVL/usr/lib/systemd/system/steamos-arm-efi-sync.service" \
+  "$R/usr/lib/systemd/system/steamos-arm-efi-sync.service" 0644
+mkdir -p "$R/etc/systemd/system/multi-user.target.wants"
+ln -sfn /usr/lib/systemd/system/steamos-arm-efi-sync.service \
+  "$R/etc/systemd/system/multi-user.target.wants/steamos-arm-efi-sync.service"
 install_file "$OVL/usr/lib/systemd/system/steamos-arm-update.service" \
   "$R/usr/lib/systemd/system/steamos-arm-update.service" 0644
 install_file "$OVL/usr/lib/systemd/user/steamos-manager-session-cleanup.service.d/10-steamos-arm-timeout.conf" \
   "$R/usr/lib/systemd/user/steamos-manager-session-cleanup.service.d/10-steamos-arm-timeout.conf" 0644
 install_file "$OVL/usr/lib/systemd/system/user@.service.d/20-steamos-arm-io.conf" \
   "$R/usr/lib/systemd/system/user@.service.d/20-steamos-arm-io.conf" 0644
+# SDDM in UTC so a timezone change during Steam's first-run setup can't make it
+# skip re-reading sddm.conf.d (Switch to Desktop does nothing on first boot).
+mkdir -p "$R/usr/lib/systemd/system/sddm.service.d"
+install_file "$OVL/usr/lib/systemd/system/sddm.service.d/10-steamos-arm-timezone.conf" \
+  "$R/usr/lib/systemd/system/sddm.service.d/10-steamos-arm-timezone.conf" 0644
 install_file "$OVL/usr/lib/systemd/system/steamos-arm-update-cleanup.service" \
   "$R/usr/lib/systemd/system/steamos-arm-update-cleanup.service" 0644
 mkdir -p "$R/usr/lib/systemd/system/multi-user.target.wants"
@@ -687,6 +732,12 @@ ln -sfn ../steamos-arm-update-cleanup.service \
   "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-update-cleanup.service"
 install_file "$OVL/usr/share/polkit-1/rules.d/60-steamos-arm-update.rules" \
   "$R/usr/share/polkit-1/rules.d/60-steamos-arm-update.rules" 0644
+install_file "$OVL/usr/share/polkit-1/rules.d/61-steamos-arm-no-plasma-charge-limit.rules" \
+  "$R/usr/share/polkit-1/rules.d/61-steamos-arm-no-plasma-charge-limit.rules" 0644
+install_file "$OVL/usr/lib/NetworkManager/conf.d/41-steamos-arm-wifi-scan.conf" \
+  "$R/usr/lib/NetworkManager/conf.d/41-steamos-arm-wifi-scan.conf" 0644
+install_file "$OVL/usr/lib/NetworkManager/conf.d/42-steamos-arm-network.conf" \
+  "$R/usr/lib/NetworkManager/conf.d/42-steamos-arm-network.conf" 0644
 install_file "$OVL/usr/share/steamos-arm/update/signing.pub" \
   "$R/usr/share/steamos-arm/update/signing.pub" 0644
 # Settings > System names the installed release (set again on each boot,
@@ -721,6 +772,10 @@ install_file "$OVL/usr/lib/udev/rules.d/70-steamos-arm-devcoredump.rules" \
 # This image never had it, so Desktop Mode had no way back but a restart.
 # Desktop Mode touch keyboard (GitHub #36): the same plasma-keyboard the
 # other images build, and KWin told to show it for a tapped text field.
+# Desktop Mode Wi-Fi applet (Syou, Gen 4): the Frame's plasma-nm 6.6.2 and
+# networkmanager-qt 6.23.0 packages; nothing is built for it.
+[[ -f "$R/usr/lib/qt6/plugins/plasma/kcms/systemsettings_qwidgets/kcm_networkmanagement.so" ]] \
+  || die "the Frame's plasma-nm 6.6.2 is missing from this rootfs (Network Manager)"
 if [[ ! -x "$R/usr/bin/plasma-keyboard" ]]; then
   log "== plasma-keyboard 0.1.0 (desktop touch keyboard)"
   "${SCRIPT_DIR}/build-plasma-keyboard.sh" "$R" \
@@ -739,14 +794,25 @@ if ! grep -q '^\[Wayland\]' "$R/etc/xdg/kwinrc" 2>/dev/null; then
   printf '\n[Wayland]\nInputMethod[$e]=%s\nVirtualKeyboardEnabled=true\n' "$KWIN_IM" >>"$R/etc/xdg/kwinrc"
 fi
 
+log "== zram, swappiness, TEO, remote play buffer, backlight untag (every SoC)"
+for f in usr/lib/systemd/zram-generator.conf.d/60-steamos-arm-zram.conf \
+         usr/lib/tmpfiles.d/steamos-arm-cpuidle-teo.conf \
+         usr/lib/sysctl.d/60-steamos-arm-net-rmem.conf \
+         usr/lib/sysctl.d/61-steamos-arm-zram.conf \
+         usr/lib/udev/rules.d/99-zz-steamos-arm-backlight-untag.rules; do
+  install_file "$OVL/$f" "$R/$f" 0644
+done
+
 log "== Return to Gaming Mode desktop icon"
 install_file "$OVL/etc/skel/Desktop/Return.desktop" "$R/etc/skel/Desktop/Return.desktop" 0644
+install_file "$OVL/etc/skel/Desktop/Record Logs.desktop" "$R/etc/skel/Desktop/Record Logs.desktop" 0644
 install_file "$OVL/etc/xdg/plasma-workspace/env/set-return-icon.sh" \
   "$R/etc/xdg/plasma-workspace/env/set-return-icon.sh" 0755
 install_file "$OVL/usr/share/icons/hicolor/scalable/apps/steamos-gamemode.svg" \
   "$R/usr/share/icons/hicolor/scalable/apps/steamos-gamemode.svg" 0644
 install_file "$OVL/etc/skel/Desktop/Return.desktop" "$R/usr/share/applications/steamos-gamemode.desktop" 0644
 install_file "$OVL/etc/skel/Desktop/Return.desktop" "$HOME_DST/Desktop/Return.desktop" 0755
+install_file "$OVL/etc/skel/Desktop/Record Logs.desktop" "$HOME_DST/Desktop/Record Logs.desktop" 0755
 chown -R 1000:1000 "$HOME_DST/Desktop"
 
 # Complete Steam ARM client in the image, same as the 8 Gen 2 / 8 Gen 3 builds.
@@ -844,7 +910,7 @@ for f in usr/lib/systemd/user.conf.d/60-sm8550-cpu-affinity.conf \
          usr/lib/systemd/user/steam.service.d/70-sm8550-cpu-affinity.conf; do
   install -Dm0644 "$ROOT/sm8550-image-overlay/$f" "$R/$f"
 done
-# Discover: Flatpak apps only. Its PackageKit backend offered Valve's pacman
+# Discover: Flatpak apps only. Its PackageKit backend offered the stock pacman
 # updates for the whole system, which replace this port's own packages (a
 # Legion Y700 Gen 4 tester's system stopped working after one), and its update
 # checks rewrite pacman's sync databases under /usr, which the updater then
@@ -864,6 +930,11 @@ sed -i -e 's/^PercentageCritical=.*/PercentageCritical=6/' -e 's/^PercentageActi
 # abort on start, over and over: the Odin 3 test 1/2 black screen.
 find "$R" -xdev -name '._*' -type f -delete 2>/dev/null || true
 [[ -z "$(find "$R" -xdev -name '._*' -type f -print -quit 2>/dev/null)" ]] || die "._ files left in $R"
+
+# Nothing we install may need a library or Qt/glibc version this rootfs lacks
+# (scripts/check-rootfs-libs.sh). No KDE Gear on this image.
+log "== library check"
+"${SCRIPT_DIR}/check-rootfs-libs.sh" "$R" --no-gear | tee -a "$LOG"
 
 # Last: what this image installed, and which release it is (see apply-overlays.sh).
 python3 "$ROOT/external-and-mods/konkr-update/konkr-update.py" record-inventory --root "$R" \

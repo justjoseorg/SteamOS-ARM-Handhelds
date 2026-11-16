@@ -6,7 +6,7 @@
 #
 # What broke s2idle before (journal, 2026-09-23):
 #   - hang on entry right after ath12k/wlan0 teardown  -> unload ath12k first
-#     (Valve does the same for ath11k on the Deck: system-sleep/modules-reload.sh)
+#     (The stock image does the same for ath11k on the Deck: system-sleep/modules-reload.sh)
 #   - chipone touch IRQ firing into a suspended I2C bus (-110 timeouts)
 #                                                      -> unbind it for the sleep
 #   - audio dead after resume (soundwire clock-stop / APM timeouts with a
@@ -86,23 +86,64 @@ battery_pct() {
   done
 }
 
+# Wake-source record. /sys/power/pm_wakeup_irq holds the interrupt that ended
+# the sleep (empty when a timer or a non-interrupt event did), and the
+# wakeup sources' event counters say which ones fired while asleep: the
+# counters are read before the sleep and again after, and the difference is
+# listed. Everything here is bounded and optional: a missing file, a failed
+# read or a slow sysfs node only drops that part of the report.
+WAKE_SNAP=/run/konkr/wakeup-start
+wake_snapshot() {  # "count<TAB>name" per wakeup source, summed by name
+  if [[ -d /sys/class/wakeup ]]; then
+    timeout 3 grep -H '' /sys/class/wakeup/wakeup*/name /sys/class/wakeup/wakeup*/event_count 2>/dev/null \
+      | awk -F: '{
+          d = $1; sub(/\/[a-z_]+$/, "", d); v = substr($0, length($1) + 2)
+          if ($1 ~ /\/name$/) n[d] = v; else c[d] = v
+        } END { for (d in n) a[n[d]] += c[d]; for (k in a) print a[k] "\t" k }'
+  elif [[ -r /sys/kernel/debug/wakeup_sources ]]; then
+    # name (may hold spaces) then nine numeric columns; event_count is the third
+    timeout 3 awk 'NR > 1 && NF > 9 {
+        n = $1; for (i = 2; i <= NF - 9; i++) n = n " " $i
+        a[n] += $(NF - 7)
+      } END { for (k in a) print a[k] "\t" k }' /sys/kernel/debug/wakeup_sources 2>/dev/null
+  fi
+}
+
+wake_changed() {  # the wakeup sources whose counter rose since the snapshot
+  [[ -s $WAKE_SNAP ]] || return 0
+  wake_snapshot | timeout 3 awk -F'\t' 'NR == FNR { b[$2] = $1; next }
+      ($1 - b[$2]) > 0 && n++ < 8 { printf "%s%s(+%d)", s, $2, $1 - b[$2]; s = ", " }' "$WAKE_SNAP" - 2>/dev/null \
+    | cut -c1-300
+}
+
+wake_irq_name() {  # wake_irq_name <irq>: handler, chip and hwirq of the interrupt
+  local irq=$1 name act chip hw
+  name=$(timeout 3 awk -v i="$irq:" '$1 == i {for (n = NF; n > 1; n--) if ($n !~ /^[0-9]+$/) {print $n; exit}}' /proc/interrupts 2>/dev/null)
+  act=$(timeout 2 cat "/sys/kernel/irq/$irq/actions" 2>/dev/null)
+  chip=$(timeout 2 cat "/sys/kernel/irq/$irq/chip_name" 2>/dev/null)
+  hw=$(timeout 2 cat "/sys/kernel/irq/$irq/hwirq" 2>/dev/null)
+  echo "${name:-?}${act:+ [$act]}${chip:+ chip=$chip}${hw:+ hwirq=$hw}" | cut -c1-200
+}
+
 # One journal line per sleep, for s2idle reports:
 #   journalctl -b | grep "s2idle report"
 report_start() {
   mkdir -p /run/konkr
   echo "$(date +%s) $(battery_pct) $(cat /sys/power/suspend_stats/success 2>/dev/null) $(cat /sys/power/suspend_stats/fail 2>/dev/null)" >/run/konkr/sleep-start
+  wake_snapshot >"$WAKE_SNAP" 2>/dev/null || : >"$WAKE_SNAP"
 }
 
 report_end() {
-  local t0 b0 ok0 fail0 t1 b1 ok1 fail1 irq name h
+  local t0 b0 ok0 fail0 t1 b1 ok1 fail1 irq what='' src h
   read -r t0 b0 ok0 fail0 </run/konkr/sleep-start 2>/dev/null || return 0
   t1=$(date +%s); b1=$(battery_pct)
   ok1=$(cat /sys/power/suspend_stats/success 2>/dev/null); fail1=$(cat /sys/power/suspend_stats/fail 2>/dev/null)
-  irq=$(cat /sys/power/pm_wakeup_irq 2>/dev/null)
-  [[ -n $irq ]] && name=$(awk -v i="$irq:" '$1 == i {for (n = NF; n > 1; n--) if ($n !~ /^[0-9]+$/) {print $n; exit}}' /proc/interrupts)
+  irq=$(timeout 2 cat /sys/power/pm_wakeup_irq 2>/dev/null)
+  [[ -n $irq ]] && what=$(wake_irq_name "$irq")
+  src=$(wake_changed)
   h=$(awk -v s=$((t1 - t0)) 'BEGIN {printf "%.2f", s / 3600}')
-  log "s2idle report: ${h} h, battery ${b0}% -> ${b1}%, suspends ok $((ok1 - ok0)) failed $((fail1 - fail0)), woken by irq ${irq:-?} ${name:-}, last failed step $(cat /sys/power/suspend_stats/last_failed_step 2>/dev/null) $(cat /sys/power/suspend_stats/last_failed_dev 2>/dev/null)"
-  rm -f /run/konkr/sleep-start
+  log "s2idle report: ${h} h, battery ${b0}% -> ${b1}%, suspends ok $((ok1 - ok0)) failed $((fail1 - fail0)), woken by irq ${irq:-none} ${what}, wakeup sources fired: ${src:-none recorded}, last failed step $(cat /sys/power/suspend_stats/last_failed_step 2>/dev/null) $(cat /sys/power/suspend_stats/last_failed_dev 2>/dev/null)"
+  rm -f /run/konkr/sleep-start "$WAKE_SNAP"
 }
 
 # Running from the SD card, the internal UFS is idle, but after a long s2idle
@@ -216,8 +257,92 @@ sysbtn_rebind() {
   done
 }
 
+# InputPlumber doesn't always recover the pad by itself. With udev slow after
+# a wake it tried to add the returning pad to the composite that was still
+# stopping, every add failed ("channel closed") and it never retried: no deck
+# target, the raw pad unhidden, Steam showed it as an Xbox pad (2026-10-18).
+# Once the pad is back, check that it is hidden and Steam's deck pad is
+# visible; if not, restart InputPlumber (~5 s).
+pad_event() {
+  local e
+  for e in /sys/class/input/event*; do
+    [[ $(cat "$e/device/name" 2>/dev/null) == "AYANEO Controller" ]] && { echo "/dev/input/${e##*/}"; return; }
+  done
+}
+
+pad_ok() {  # pad_ok <pad evdev>
+  local h
+  [[ $(stat -c %a "$1" 2>/dev/null) == 0 ]] || return 1
+  for h in /sys/class/hidraw/hidraw*; do
+    [[ $(readlink -f "$h/device") == */0003:28DE:12F0.* ]] || continue
+    [[ $(stat -c %a "/dev/${h##*/}" 2>/dev/null) != 0 ]] && return 0
+  done
+  return 1
+}
+
+# After some wakes Steam reopens the pad but never loads its input config, so
+# the pad does nothing but haptics until the Steam menu is opened. A reconnect
+# while awake always loads it, so when the config doesn't follow, reconnect once.
+steam_controller_log() {
+  [[ -n ${KONKR_STEAM_CONTROLLER_LOG:-} ]] && { echo "$KONKR_STEAM_CONTROLLER_LOG"; return; }
+  ls -t /home/*/.local/share/Steam/logs/controller.txt 2>/dev/null | head -1
+}
+
+steam_pad_config_watch() {  # steam_pad_config_watch <log> <lines before the wake>
+  local i dev found=
+  for i in {1..30}; do
+    tail -n +"$(($2 + 1))" "$1" 2>/dev/null | grep -aq 'controller device opened' && { found=1; break; }
+    sleep 0.5
+  done
+  [[ -n $found ]] || return 0  # Steam isn't running, or hasn't seen the pad go
+  sleep 4
+  tail -n +"$(($2 + 1))" "$1" 2>/dev/null | grep -aqE 'Add to Config Cache|Queueing activation' && return 0
+  log "pad-watch: Steam did not load the pad's config, reconnecting the pad"
+  for dev in "$XHCI_DRV"/[0-9a-f]*:*; do
+    [[ -e $dev ]] || continue
+    dev=${dev##*/}
+    # Stopped halfway (a new sleep starting): don't leave the USB port unbound.
+    trap 'echo "$dev" >"$XHCI_DRV/bind" 2>/dev/null; exit 0' TERM
+    echo "$dev" >"$XHCI_DRV/unbind" 2>/dev/null || continue
+    sleep 1
+    sysbtn_rebind
+    echo "$dev" >"$XHCI_DRV/bind" 2>/dev/null || log "pad-watch: usb rebind $dev failed"
+    trap - TERM
+  done
+}
+
+pad_watch() {
+  local i ev= clog lines=0
+  clog=$(steam_controller_log)
+  [[ -n $clog ]] && lines=$(wc -l <"$clog" 2>/dev/null || echo 0)
+  for i in {1..30}; do
+    ev=$(pad_event); [[ -n $ev ]] && break
+    sleep 0.5
+  done
+  [[ -n $ev ]] || { log "pad-watch: the pad never came back"; return; }
+  for i in {1..8}; do
+    sleep 1
+    if pad_ok "$ev"; then
+      [[ -n $clog ]] && steam_pad_config_watch "$clog" "$lines"
+      return
+    fi
+  done
+  log "pad-watch: InputPlumber lost the pad, restarting it"
+  timeout 30 systemctl restart inputplumber.service
+}
+
+pad_watch_stop() {
+  timeout 10 systemctl stop konkr-pad-watch.service 2>/dev/null || true
+}
+
+pad_watch_start() {
+  pad_watch_stop
+  systemd-run --no-block --quiet --collect --unit=konkr-pad-watch \
+    /usr/lib/konkr/konkr-sleep pad-watch 2>/dev/null || true
+}
+
 # 8 Gen 3 on our 7.2 kernel: the kernel itself handles Wi-Fi, audio graphs,
-# touch and the PMIC wake sources across s2idle (Armada's suspend series).
+# touch and the PMIC wake sources across s2idle.
 # Unloading ath12k and unbinding touch on top of that hung the Pocket FIT on
 # the first sleep; with only the report and the UFS step it sleeps and wakes
 # every time (2026-10-04). The full preparation stays for older kernels and
@@ -243,17 +368,29 @@ lights_off() {
   done
 }
 
+# AYANEO Pocket DS: with devices suspended in parallel the Goodix touchscreen
+# can lose the race with its I2C bus and the suspend aborts with -EAGAIN.
+# Suspending the devices one after another costs a moment and always goes
+# through. Parallel suspend comes back on wake.
+serial_suspend() {  # 1 = one device at a time, 0 = kernel default
+  [[ -w /sys/power/pm_async ]] || return 0
+  tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null | grep -qx 'ayaneo,pocketds' || return 0
+  echo $(( 1 - $1 )) >/sys/power/pm_async 2>/dev/null
+}
+
 pre() {
   local n u x
+  pad_watch_stop
   lights_off
   report_start
   wifi_mark
   x=$(xhci_off)
+  serial_suspend 1
   if light; then
     # Wake sources too: left on, the charger's and DSPs' notifications and
     # PCI devices woke the device at random while it slept.
     wake_sources
-    sync
+    timeout 10 sync
     u=$(ufs_off)
     log "pre: kernel handles the devices, ufs unbound=${u:-none}${x:+, usb unbound=$x}"
     return
@@ -264,7 +401,7 @@ pre() {
   if [[ -d /sys/module/${WIFI_MODS[0]} ]]; then
     timeout 15 modprobe -r "${WIFI_MODS[@]}" || log "ath12k unload failed"
   fi
-  sync
+  timeout 10 sync
   u=$(ufs_off)
   log "pre: audio suspended, touch unbound=$n, wifi=$([[ -d /sys/module/${WIFI_MODS[0]} ]] && echo loaded || echo unloaded), ufs unbound=${u:-none}${x:+, usb unbound=$x}"
 }
@@ -288,10 +425,12 @@ touch_on() {
 
 post() {
   report_end
+  serial_suspend 0
   ufs_on
   fan_supply_on
   sysbtn_rebind
   xhci_on
+  pad_watch_start
   wifi_watch_start
   if light; then
     systemctl kill -s HUP konkrd.service >/dev/null 2>&1
@@ -300,7 +439,7 @@ post() {
   fi
   touch_on
   if [[ ! -d /sys/module/${WIFI_MODS[0]} ]]; then
-    modprobe "${WIFI_MODS[0]}" || log "ath12k reload failed"
+    timeout 20 modprobe "${WIFI_MODS[0]}" || log "ath12k reload failed"
   fi
   audio 0
   # konkrd re-applies profile clocks/LEDs on SIGHUP
@@ -325,9 +464,10 @@ case "${1:-}" in
   # frozen (PipeWire kept running), then thaw, standby-screen-on, standby-post.
   standby-audio-on) audio 0 ;;
   standby-post)
-    [[ -d /sys/module/${WIFI_MODS[0]} ]] || modprobe "${WIFI_MODS[0]}" ;;
+    [[ -d /sys/module/${WIFI_MODS[0]} ]] || timeout 20 modprobe "${WIFI_MODS[0]}" ;;
   standby-screen-on) gamescope_screen 0 ;;
+  pad-watch) pad_watch ;;
   wifi-watch) exec /usr/lib/steamos-arm/steamos-arm-wifi-wake watch ;;
-  *) echo "usage: konkr-sleep pre|post|standby-pre|standby-audio-on|standby-post|standby-screen-on|wifi-watch" >&2; exit 2 ;;
+  *) echo "usage: konkr-sleep pre|post|pad-watch|standby-pre|standby-audio-on|standby-post|standby-screen-on|wifi-watch" >&2; exit 2 ;;
 esac
 exit 0

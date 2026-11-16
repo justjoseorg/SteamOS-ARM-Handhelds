@@ -17,8 +17,8 @@ shift
 ARCHES=("${@:-aarch64 x86_64 i386}")
 read -ra ARCHES <<<"${ARCHES[*]}"
 
-MESA_VERSION=26.2.3
-MESA_SHA256=1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f
+MESA_VERSION=26.2.7
+MESA_SHA256=04294f75d22e9f61cd1e050206bc48b3d39366e788f1803a3368e3d5a872ce18
 W="${MESA_WORK:-/work/mesa}"
 G="$R/usr/share/guestos/fex-mesa"
 PATCHES="${ROOT}/external-and-mods/mesa/patches"
@@ -31,7 +31,7 @@ HOST_PY="${MESA_HOST_VENV:-$W/venv}/bin"
 log() { printf '==> [mesa] %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Same drivers as Valve's Frame Mesa: Turnip, zink as the only GL driver.
+# Same drivers as the stock Frame Mesa: Turnip, zink as the only GL driver.
 OPTS=(
   --buildtype=release -Db_ndebug=true --prefix=/usr
   -Dplatforms=x11,wayland
@@ -52,7 +52,9 @@ prepare_source() {
   fi
   echo "${MESA_SHA256}  $tar" | sha256sum -c - >/dev/null || die "mesa tarball checksum mismatch"
   local digest
-  digest="$(cat "$PATCHES"/*.patch | sha256sum | cut -d' ' -f1)"
+  # The version is part of the digest: a version bump with unchanged patches
+  # must not reuse the old source tree.
+  digest="$( (echo "$MESA_VERSION"; cat "$PATCHES"/*.patch) | sha256sum | cut -d' ' -f1)"
   if [[ -f "$W/src/.patched" && "$(cat "$W/src/.patched")" == "$digest" ]]; then
     log "source ready"
     return
@@ -84,7 +86,7 @@ build_aarch64() {
   log "aarch64: done ($o)"
 }
 
-# The guest tree ships libraries but almost no headers (Valve only needs it at
+# The guest tree ships libraries but almost no headers (the stock image only needs it at
 # runtime). Take the headers from the matching Arch x86_64 packages; lib32
 # packages use the same headers. glibc headers come from the cross compiler.
 GUEST_HEADER_PKGS=(
@@ -170,18 +172,18 @@ cpu = '${cpu}'
 endian = 'little'
 EOF
   # Build-machine tools: Mesa wants wayland-scanner >= 1.23.1, Ubuntu 24.04 has
-  # 1.22. The Frame's own (1.26, aarch64 like this build host) runs fine here
-  # against the host's libexpat/libxml2 (don't point it at the Frame's libc).
+  # 1.22. The Frame's own (1.26, aarch64 like this build host) does the job.
   mkdir -p "$W/tools"
   # Meson's wayland module wants the scanner version to equal the target's
   # libwayland (the guest has 1.23.1); the code 1.26 generates only uses
-  # calls libwayland has had for years, so report the guest version.
+  # calls libwayland has had for years, so report the guest version. The Frame
+  # scanner runs inside the rootfs: it needs the rootfs's libxml2.
   local wlver
   wlver="$(sed -n 's/^Version: //p' "$s/usr/${libdir}/pkgconfig/wayland-client.pc")"
   cat >"$W/tools/wayland-scanner" <<EOF2
 #!/bin/sh
 if [ "\$1" = "--version" ]; then echo "wayland-scanner ${wlver}" >&2; exit 0; fi
-exec "$R/usr/bin/wayland-scanner" "\$@"
+exec bwrap --tmpfs / --ro-bind "$R/usr" /usr --symlink usr/lib /lib --symlink usr/bin /bin --ro-bind "$R" "$R" --bind "$W" "$W" --dev /dev --proc /proc --chdir "\$PWD" /usr/bin/wayland-scanner "\$@"
 EOF2
   chmod +x "$W/tools/wayland-scanner"
   "$W/tools/wayland-scanner" --version >/dev/null 2>&1 || die "Frame wayland-scanner does not run on this host"
@@ -197,11 +199,11 @@ EOF2
   log "$arch: done ($o)"
 }
 
-# Lepton (Android 11 container): same drivers as Valve's Android Mesa (Turnip,
+# Lepton (Android 11 container): same drivers as the stock Android Mesa (Turnip,
 # zink), bionic via the NDK sysroot. Google ships NDK compilers for x86 hosts
 # only, so this uses the host's clang 18 with the r27c (clang 18) sysroot and
 # runtime (the NDK's clang defaults: compiler-rt, libunwind, libc++, lld).
-# Files land where Valve's do: usr/share/guestos/android/vendor/lib64.
+# Files land where the stock do: usr/share/guestos/android/vendor/lib64.
 NDK_VERSION=r27c
 NDK_SHA1=090e8083a715fdb1a3e402d0763c388abb03fb4e
 ANDROID_API=30
@@ -260,7 +262,7 @@ CROSS
     || { tail -40 "$W/android.log"; die "android meson failed"; }
   log "android: ninja"
   ninja -C "$b" >>"$W/android.log" 2>&1 || { tail -40 "$W/android.log"; die "android build failed"; }
-  # Android's loaders go by file name, not soname (same names as Valve's).
+  # Android's loaders go by file name, not soname (same names as the stock ones).
   install -m0755 "$b/src/freedreno/vulkan/libvulkan_freedreno.so" "$v/hw/vulkan.freedreno.so"
   install -m0755 "$b/src/gallium/targets/dri/libgallium_dri.so" "$v/libgallium_dri.so"
   install -m0755 "$b/src/gbm/libgbm_mesa.so" "$v/libgbm_mesa.so"

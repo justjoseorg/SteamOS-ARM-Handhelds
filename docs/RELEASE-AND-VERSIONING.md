@@ -1,6 +1,6 @@
-# Release and Versioning Strategy — SteamOS ARM Handhelds
+# Release and Versioning Strategy — Zaviya
 
-This document outlines the version management architecture, component upgrade lifecycles, and automated release pipeline for the SteamOS ARM handheld ports (AYN Odin 3 / SM8750).
+This document outlines the version management architecture, component upgrade lifecycles, and automated release pipeline for the Zaviya handheld ports (AYN Odin 3 / SM8750).
 
 ---
 
@@ -20,9 +20,9 @@ Building an unofficial SteamOS distribution involves both lightweight platform c
                                 │ Consumes pinned, pre-built assets
 ┌───────────────────────────────┴─────────────────────────────────┐
 │                    SLOW TIER (Core Binary Stacks)               │
-│  • Kernel: Linux 7.2.0 from source with tracefs enabled         │
-│  • Graphics: Mesa 26.2.3 (Turnip + Zink, 4 cross-slices)        │
-│  • Base OS: Valve Deckard SteamOS rootfs (casync chunk store)   │
+│  • Kernel: Linux 7.4-rc1 from source with tracefs enabled       │
+│  • Graphics: Mesa 26.2.7 (Turnip + Zink, 4 cross-slices)        │
+│  • Base OS: Deckard SteamOS rootfs (casync chunk store)   │
 │  • Steam Client: Pre-bootstrapped sanitized ARM user seed       │
 │  • Cadence: Infrequent (upstream major version bumps)           │
 │  • Build Duration: 20 to 90 minutes                             │
@@ -35,13 +35,13 @@ By decoupling image assembly from recompiling the core stacks, everyday commits 
 
 ## 2. Global Version Manifest (`versions.env`)
 
-All upstream dependency versions, image hashes, toolchain pins, and release tags are centralized in a single file at the root of the repository: [`versions.env`](../versions.env).
+All upstream dependency versions, image hashes, toolchain pins, and release tags are centralized in a single file at the root of the repository, `versions.env`. It is not checked in yet, and until it is the workflows fall back to the values written in them.
 
 It defines:
-- **Valve SteamOS Base:** Upstream rootfs build, bundle name, and CDN URL (`STEAMOS_BUILD`, `STEAMOS_BUNDLE`, `STEAMOS_URL`).
+- **SteamOS Base:** Upstream rootfs build, bundle name, and CDN URL (`STEAMOS_BUILD`, `STEAMOS_BUNDLE`, `STEAMOS_URL`).
 - **Mesa Graphics Stack:** Mesa release version, sha256 checksum, Android NDK version, and NDK sha1 (`MESA_VERSION`, `MESA_SHA256`, `NDK_VERSION`, `NDK_SHA1`).
 - **Steam Client ARM Channel:** The beta channel bootstrapped in CI (`STEAM_ARM_CHANNEL`).
-- **Kernel & Distribution Pins:** Pinned ROCKNIX release tag and kernel version (`ROCKNIX_REF`, `KVER`).
+- **Kernel & Distribution Pins:** Pinned base release tag and kernel version (`ROCKNIX_REF`, `KVER`).
 
 ### How It Is Consumed
 - **Bash Scripts (`make-steamos-*.sh`, `scripts/build-mesa.sh`):** Automatically source `versions.env` if present, while allowing local environment variables to override them.
@@ -51,8 +51,8 @@ It defines:
 
 ## 3. Component Upgrade Runbooks
 
-### A. Upgrading the Valve SteamOS Base (`STEAMOS_BUILD`)
-Valve periodically updates the SteamOS ARM rootfs for the Steam Frame on `steamdeck-images.steamos.cloud`.
+### A. Upgrading the SteamOS Base (`STEAMOS_BUILD`)
+The SteamOS for ARM rootfs for the Steam Frame is updated periodically on `steamdeck-images.steamos.cloud`.
 1. Update `STEAMOS_BUILD` and `STEAMOS_BUNDLE` in `versions.env`.
 2. Trigger `build-image-sm8750.yml` (or run `./make-steamos-sm8750.sh` locally).
 3. The script automatically fetches the new `.raucb` bundle and reassembles the updated `rootfs.img` via casync.
@@ -64,7 +64,7 @@ The Mesa stack requires four slices (`aarch64` native via rootfs bubblewrap, `x8
 3. Trigger the `.github/workflows/build-mesa-sm8750.yml` workflow via GitHub Actions `workflow_dispatch`.
 4. Once verified, publish the resulting `mesa-sm8750.tar.zst` artifact to a release asset tag and update the pointer.
 
-### C. Upgrading the Kernel & ROCKNIX Tree
+### C. Upgrading the Kernel & Base Tree
 The Odin 3 kernel is compiled from source with `CONFIG_FTRACE=y` (enabling tracefs for `mangoapp` and `steamos-manager`):
 1. Update `ROCKNIX_REF` or `KVER` in `versions.env` and `external-and-mods/kernel-sm8750/soc.env`.
 2. Trigger `.github/workflows/build-kernel-sm8750.yml` via `workflow_dispatch` on native `ubuntu-24.04-arm` runners.
@@ -87,7 +87,7 @@ To ensure quality and prevent non-booting images from reaching end users, image 
 ┌────────────────────────────────────────────────────────┐
 │  build-image-sm8750.yml (The Builder)                  │
 │  • Trigger: workflow_dispatch (manual test builds)      │
-│  • Output: steamos-odin3-image Actions artifact        │
+│  • Output: zaviya-odin3-image Actions artifact        │
 │  • Safe to test any commit or overlay change           │
 └──────────────────────────┬─────────────────────────────┘
                            │
@@ -105,11 +105,11 @@ To ensure quality and prevent non-booting images from reaching end users, image 
 
 ### Step 1: Building a Test Image (`build-image-sm8750.yml`)
 1. Trigger the **Build Odin 3 (8 Elite) Image** workflow via `workflow_dispatch` on GitHub Actions.
-2. The workflow compiles the rootfs and uploads the compressed image as a workflow artifact named `steamos-odin3-image` (containing `steamos-odin3.img.zst` and `.sha256`).
+2. The workflow compiles the rootfs and uploads the compressed image as a workflow artifact named `zaviya-odin3-image` (containing `zaviya-odin3.img.zst` and `.sha256`).
 3. Download the artifact from the Actions run summary, flash to your micro-SD card:
    ```bash
-   zstd -d steamos-odin3.img.zst -o steamos-odin3.img
-   sudo dd if=steamos-odin3.img of=/dev/sdX bs=4M status=progress conv=fsync
+   zstd -d zaviya-odin3.img.zst -o zaviya-odin3.img
+   sudo dd if=zaviya-odin3.img of=/dev/sdX bs=4M status=progress conv=fsync
    ```
 4. Verify hardware boot on the Odin 3 (DSI-1 display orientation, controls, audio, WiFi, and Steam login).
 

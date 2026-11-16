@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Name the installed SteamOS ARM release in /etc/os-release.
+"""Name the installed Zaviya release in /etc/os-release.
 
 Steam's Settings > System shows PRETTY_NAME as "OS Name", and Desktop Mode's
 About page shows it too. Frame's own VERSION_ID and BUILD_ID stay as they
@@ -23,7 +23,10 @@ except (OSError, ValueError):
 if not re.fullmatch(r"\d+(?:\.\d+)*", version or ""):
     sys.exit(0)                           # images before v1.3 don't record their release
 
-want = {"PRETTY_NAME": f'"Unofficial SteamOS ARM {version}"', "VERSION": f'"{version}"'}
+URL = "https://github.com/hashtagbasit/Zaviya"
+want = {"NAME": '"Zaviya"', "PRETTY_NAME": f'"Zaviya {version}"', "VERSION": f'"{version}"', "LOGO": "zaviya",
+        "HOME_URL": f'"{URL}"', "DOCUMENTATION_URL": f'"{URL}"', "SUPPORT_URL": f'"{URL}/issues"',
+        "BUG_REPORT_URL": f'"{URL}/issues"'}
 for rel in ("etc/os-release", "usr/lib/os-release"):
     path = root / rel
     if not path.is_file() or (rel == "usr/lib/os-release" and str(root) == "/"):
@@ -47,3 +50,15 @@ for rel in ("etc/os-release", "usr/lib/os-release"):
     tmp.write_text(text)
     os.chmod(tmp, 0o644)
     os.replace(tmp, path)                 # a link to /usr becomes a file of our own
+
+# The Desktop Mode start menu shows the account's full name. Leave a name the
+# user chose alone.
+passwd = root / "etc/passwd"
+if passwd.is_file():
+    text = passwd.read_text()
+    named = re.sub(r"^(steamos:[^:]*:[^:]*:[^:]*:)SteamOS user:", r"\1Zaviya user:", text, flags=re.M)
+    if named != text:
+        tmp = passwd.with_name("passwd.tmp")
+        tmp.write_text(named)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, passwd)

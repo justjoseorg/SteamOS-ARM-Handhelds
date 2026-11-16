@@ -1,4 +1,4 @@
-# CI Build Plan — SteamOS ARM (Odin 3 / SM8750)
+# CI Build Plan — Zaviya (Odin 3 / SM8750)
 
 > **Status:** Draft / MVP
 > **Target:** GitHub Actions workflows to build and publish the Odin 3 image as an artifact.
@@ -31,7 +31,7 @@ and have wildly different build times.
 │                                                            │
 │  1. Free disk space (~40 GB)                               │
 │  2. Download kernel + Mesa artifacts                       │
-│  3. Download SteamOS rootfs (Valve CDN, casync)            │
+│  3. Download SteamOS rootfs (SteamOS CDN, casync)            │
 │  4. Restore Steam ARM seed from cache                      │
 │     (or automated headless bootstrap in ~50s)              │
 │  5. Apply overlays (Turnip, kernel, seed)                  │
@@ -54,19 +54,19 @@ and have wildly different build times.
 
 ### Why from-source?
 
-ROCKNIX's prebuilt kernel ships without `CONFIG_FTRACE`. Without ftrace/tracefs:
+The base release's prebuilt kernel ships without `CONFIG_FTRACE`. Without ftrace/tracefs:
 - mangoapp (Performance Overlay) crashes immediately
 - steamos-manager stalls Game Mode boot by ~3 minutes
 - "Switch to Desktop" and update checks don't work
 
-Building from source with our `steamos.config` fragment enables tracefs with
+Building from source with the project's `steamos.config` fragment enables tracefs with
 zero runtime overhead (`CONFIG_ENABLE_DEFAULT_TRACERS=y`).
 
 ---
 
 ## Workflow 2: `build-mesa-sm8750.yml`
 
-**Purpose:** Build the Mesa 26.2.3 graphics stack (Turnip Vulkan + Zink OpenGL)
+**Purpose:** Build the Mesa 26.2.7 graphics stack (Turnip Vulkan + Zink OpenGL)
 for Adreno 830, in four architecture slices.
 
 - **Runner:** `ubuntu-24.04-arm` (aarch64 build runs inside rootfs via bwrap)
@@ -82,7 +82,7 @@ for Adreno 830, in four architecture slices.
 | `aarch64/` | ARM64 native | On-device Turnip + Zink |
 | `x86_64/` | x86_64 guest | FEX emulated x86_64 games |
 | `i386/` | i686 guest | FEX emulated 32-bit games |
-| `android/` | Android/Bionic | Lepton (Valve's Android container) |
+| `android/` | Android/Bionic | Lepton (the Android container) |
 
 ---
 
@@ -95,12 +95,12 @@ and the downloaded SteamOS rootfs.
 - **Triggers:** `workflow_dispatch` only
 - **Requires:** Successful `build-kernel-sm8750.yml` and `build-mesa-sm8750.yml` runs
 - **Build time:** ~30–45 min (dominated by rootfs download)
-- **Artifact:** `steamos-odin3.img.zst` (~6–8 GB compressed)
+- **Artifact:** `zaviya-odin3.img.zst` (~6–8 GB compressed)
 
 ### Seed & First-Boot Experience
 
 - **Automated Steam ARM Seed:** The image pre-seeds a complete, sanitized Steam ARM client via `scripts/bootstrap-steam-arm-seed.sh`.
-- **Cached in CI:** Cached via `@actions/cache` (`steam-seed-${STEAMOS_BUILD}-${STEAM_ARM_CHANNEL}`). On cache miss, CI boots Steam headlessly inside a Bubblewrap container in ~50s to download and unpack the client from Valve's official CDN.
+- **Cached in CI:** Cached via `@actions/cache` (`steam-seed-${STEAMOS_BUILD}-${STEAM_ARM_CHANNEL}`). On cache miss, CI boots Steam headlessly inside a Bubblewrap container in ~50s to download and unpack the client from the official Steam CDN.
 - **Image published as a workflow artifact** (90-day retention), with a decoupled `release-sm8750.yml` for publishing tested images.
 
 ---
@@ -137,7 +137,7 @@ gh run download "$RUN_ID" -n kernel-sm8750 -D ./kernel-out/
 
 ## Future improvements
 - [x] **Automated Steam ARM Seed:** Headlessly bootstrapped from upstream rootfs in CI via `scripts/bootstrap-steam-arm-seed.sh` and cached with `actions/cache`.
-- [x] **Decoupled GitHub Releases:** `release-sm8750.yml` publishes tested artifacts directly as GitHub releases with chunked 7z support.
+- [x] **Decoupled GitHub Releases:** `release-sm8750.yml` publishes tested artifacts as releases.
 - [ ] **Rootfs chunk caching:** Cache casync chunks across runs for even faster rootfs extraction.
 - [ ] **Matrix builds:** Expand workflows to support SM8650/SM8550 targets alongside SM8750.
 - [ ] **Automated smoke testing:** Mount output image in CI to verify partition layout and key binaries.

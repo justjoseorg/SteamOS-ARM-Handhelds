@@ -1,4 +1,4 @@
-const manifest = {"name":"Handheld Control"};
+const manifest = {"name":"Zaviya Control"};
 const API_VERSION = 2;
 const internalAPIConnection = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
 if (!internalAPIConnection) {
@@ -34,10 +34,15 @@ const bootAndroid = callable("boot_android");
 const setMenuClicks = callable("set_menu_clicks");
 const setBypass = callable("set_bypass");
 const setButton = callable("set_button");
+const setRemap = callable("set_remap");
 const setGameFan = callable("set_game_fan");
 const setFanTuning = callable("set_fan_tuning");
 const setChargeLimit = callable("set_charge_limit");
 const setSsh = callable("set_ssh");
+const installProbe = callable("install_probe");
+const installStart = callable("install_start");
+const installStatus = callable("install_status");
+const recordLogs = callable("record_logs");
 const getGames = callable("get_games");
 const setGamePerf = callable("set_game_perf");
 const setChargingFan = callable("set_charging_fan");
@@ -75,6 +80,18 @@ const BUTTON_ACTIONS = [
     { data: "fan-boost", label: "Fan boost" },
     { data: "game", label: "Game button (bind in Steam)" },
     { data: "none", label: "Nothing" },
+];
+
+const REMAP_OPTIONS = [
+    { data: "default", label: "Default" },
+    { data: "start", label: "Start" },
+    { data: "select", label: "Select" },
+    { data: "steam", label: "Steam" },
+    { data: "quickaccess", label: "Quick Access" },
+];
+const REMAP_BUTTONS = [
+    ["steam", "Steam button", "Opens the left menu by default. Applies at once; the controller reconnects for a moment"],
+    ["perf", "Performance button", "Front, top right. Cycles the performance profile by default. Applies at once; the controller reconnects for a moment"],
 ];
 
 const PROFILES = [
@@ -158,7 +175,7 @@ function findQueryClient() {
         queryClient = DFL.findModuleExport((e) => e && typeof e.getQueryData === "function"
             && typeof e.getQueryCache === "function" && typeof e.setQueryData === "function"
             && typeof e.invalidateQueries === "function") || null;
-    } catch (e) { console.log("Handheld Control: query cache", e); }
+    } catch (e) { console.log("Zaviya Control: query cache", e); }
     return queryClient;
 }
 function trimFrameRates(d) {
@@ -250,7 +267,7 @@ function PasswordModal({ replace, onDone, closeModal }) {
         bOKDisabled: a.length < 4 || a !== b,
         onOK: () => setPassword(a).then((ok) => {
             if (!ok) return setErr("Could not set it (use 4 characters or more, no colon)");
-            toaster.toast({ title: "Handheld Control", body: replace ? "Password changed" : "Password set" });
+            toaster.toast({ title: "Zaviya Control", body: replace ? "Password changed" : "Password set" });
             onDone && onDone();
             closeModal && closeModal();
         }),
@@ -261,6 +278,50 @@ function PasswordModal({ replace, onDone, closeModal }) {
             jsx(DFL.TextField, { label: "Again", bIsPassword: true, value: b, onChange: (e) => setB(e.target.value) }),
             jsx("div", { style: { fontSize: "12px", opacity: 0.75 }, children: err || (b && a !== b ? "The two don't match" : replace ? "Replaces the current one, for SSH and sudo" : "Also used for sudo in Desktop Mode") }),
         ] }),
+    });
+}
+
+// Install to internal storage: what gets erased, how much Android keeps, what
+// to bring over. Nothing starts until the switch is on.
+const HOME_CHOICES = [
+    { data: "all", label: "Everything, installed games included" },
+    { data: "essentials", label: "Settings, saves and Steam login (no games)" },
+    { data: "none", label: "Fresh start (no Steam login, saves or games)" },
+];
+function InstallModal({ probe, onStart, closeModal }) {
+    const installed = probe.MODE === "installed";
+    const [gb, setGb] = useState(Number(probe.RECOMMENDED_ANDROID_GIB));
+    const [home, setHome] = useState("all");
+    const [ack, setAck] = useState(false);
+    const line = (text) => jsx("div", { style: { fontSize: "13px" }, children: text });
+    return jsx(DFL.ConfirmModal, {
+        strTitle: "Install Zaviya to internal storage",
+        strOKButtonText: "Install",
+        bOKDisabled: !ack,
+        onOK: () => { onStart(gb, home, installed); closeModal && closeModal(); },
+        onCancel: () => closeModal && closeModal(),
+        closeModal,
+        children: jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: [
+            ...(installed ? [
+                line("Zaviya on internal storage is erased and copied again, games and saves on it included. Android isn't touched."),
+            ] : [
+                line("Android's data is erased: apps, photos, accounts."),
+                line("Android itself stays and sets itself up again."),
+                line("The old partition table is saved to the card so it can be put back."),
+            ]),
+            installed ? null : jsx(DFL.SliderField, {
+                label: "Android size (GB)", value: gb, showValue: true, step: 1,
+                min: Number(probe.MIN_ANDROID_GIB), max: Number(probe.MAX_ANDROID_GIB),
+                onChange: setGb,
+            }),
+            jsx(DFL.DropdownItem, {
+                label: "Bring from the card",
+                rgOptions: HOME_CHOICES,
+                selectedOption: home,
+                onChange: (o) => setHome(o.data),
+            }),
+            jsx(DFL.ToggleField, { label: "I understand this erases data", checked: ack, onChange: setAck }),
+        ].filter(Boolean) }),
     });
 }
 
@@ -610,7 +671,7 @@ function GameSettings({ st, refresh, target, name, running, onBack }) {
                 onChange: (o) => change({ priority: o.data === "normal" ? undefined : o.data }),
             })),
         ]),
-        section("Fan", [
+        st.has_fan === false ? null : section("Fan", [
             row(jsx(DFL.DropdownItem, {
                 label: "Fan for this game",
                 rgOptions: gameFanOptions(st.fan_curves || {}),
@@ -665,6 +726,85 @@ const TAB_ICONS = {
     more: icon("M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M1 14h6", "M9 8h6", "M17 16h6"),
 };
 
+// The installer runs as a system unit, so it keeps going if Steam restarts.
+// Probe once per mount; the status is polled while the panel is open.
+let lastProbe = null;
+function InternalStorage({ tablet }) {
+    const [probe, setProbe] = useState(lastProbe);
+    const [job, setJob] = useState({ state: "idle", line: "" });
+    const [err, setErr] = useState("");
+    useEffect(() => {
+        let live = true;
+        if (!lastProbe) {
+            installProbe().then((p) => {
+                if (!p.error) lastProbe = p;
+                if (live) setProbe(p);
+            }).catch(() => {});
+        }
+        const poll = () => installStatus().then((j) => { if (live) setJob(j); }).catch(() => {});
+        poll();
+        const t = setInterval(poll, 2000);
+        return () => { live = false; clearInterval(t); };
+    }, []);
+    if (!probe || probe.unsupported) return null;
+    const start = (gb, home, reinstall) => {
+        lastProbe = null;
+        setErr("");
+        installStart(gb, home, probe.TABLE_FINGERPRINT, reinstall).then((r) => {
+            if (r.error) setErr(r.error); else setJob({ state: "running", line: "" });
+        }).catch(() => setErr("Could not start the install"));
+    };
+    const ready = !probe.error && probe.RUNNING_FROM_SD === "1" && (probe.MODE === "fresh" || probe.MODE === "installed");
+    const button = row(jsx(DFL.ButtonItem, {
+        layout: "below",
+        disabled: !ready,
+        description: "How much space Android keeps is chosen next",
+        onClick: () => DFL.showModal(jsx(InstallModal, { probe, onStart: start })),
+        children: "Install to internal storage",
+    }));
+    const notes = [
+        probe.error ? note(probe.error) : null,
+        err ? note(err) : null,
+        probe.MODE === "occupied" ? note("Other partitions follow userdata. Remove them in the ABL menu (UNINSTALL CFW) first.") : null,
+    ];
+    let body;
+    if (job.state === "running") {
+        body = [note("Installing, about 5 to 10 minutes. Don't power off or remove the card."), note(job.line)];
+    } else if (job.state === "done") {
+        body = [note(tablet
+            ? "Install finished. Power off, unplug the USB drive, then power on."
+            : "Install finished. Power off, remove the card, then in the ABL menu set Boot source to Internal and boot Linux.")];
+    } else if (job.state === "failed") {
+        body = [note("Install failed."), note(job.line), button, ...notes];
+    } else {
+        body = [button, ...notes];
+    }
+    return section("Internal storage", body);
+}
+
+// Collects the diagnostic logs into one archive in the user's home folder.
+function LogRecorder() {
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState("");
+    const run = () => {
+        setBusy(true);
+        setMsg("Recording logs, this can take up to a minute");
+        recordLogs().then((r) => {
+            setMsg(r && r.path ? `Saved to ${r.path}` : `Could not save the logs${r && r.error ? `: ${r.error}` : ""}`);
+        }).catch(() => setMsg("Could not save the logs")).then(() => setBusy(false));
+    };
+    return section("Support", [
+        row(jsx(DFL.ButtonItem, {
+            layout: "below",
+            disabled: busy,
+            description: "Saves the diagnostic logs as one file to share when reporting a problem",
+            onClick: run,
+            children: busy ? "Recording…" : "Record logs",
+        })),
+        msg ? note(msg) : null,
+    ]);
+}
+
 function Content() {
     const withPick = (n) => (n && Date.now() - rgbPick.at < 2500 ? { ...n, rgb: rgbPick.rgb } : n);
     const [st, setStState] = useState(() => withPick(lastState));
@@ -709,7 +849,7 @@ function Content() {
         { id: "game", label: "Game" },
         { id: "lights", label: "Lights" },
         { id: "more", label: "More" },
-    ];
+    ].filter((t) => t.id !== "fan" || st.has_fan !== false);
     const pages = {
         power: () => [
             section("Profile", [
@@ -801,6 +941,13 @@ function Content() {
                     selectedOption: (st.buttons || {})[key] || "none",
                     onChange: (o) => setButton(key, o.data).then(refresh),
                 }))),
+                ...(st.remap_available ? REMAP_BUTTONS.map(([key, label, description]) => row(jsx(DFL.DropdownItem, {
+                    label,
+                    description,
+                    rgOptions: REMAP_OPTIONS,
+                    selectedOption: (st.remap || {})[key] || "default",
+                    onChange: (o) => setRemap(key, o.data).then(refresh),
+                }))) : [note("Button remap is unavailable: the controller maps were not found")]),
                 note("Home = Steam button · right front button = Quick Access · Power: tap to sleep, hold for the power menu"),
             ]) : null,
             st.system ? section("System", [
@@ -839,11 +986,13 @@ function Content() {
                     description: "Needed for the KONKR, Performance and Quick Access buttons and stick lighting",
                     checked: st.mcu_enabled,
                     onChange: (v) => setMcu(v).then(() => {
-                        toaster.toast({ title: "Handheld Control", body: v ? "MCU link enabled" : "MCU link disabled" });
+                        toaster.toast({ title: "Zaviya Control", body: v ? "MCU link enabled" : "MCU link disabled" });
                         refresh();
                     }),
                 })) : null,
             ]),
+            jsx(InternalStorage, { tablet: !!st.tablet }),
+            jsx(LogRecorder, {}),
         ],
     };
     const header = jsx("div", { style: { fontSize: "12px", opacity: 0.8, textAlign: "center", padding: "4px 0" },
@@ -854,7 +1003,7 @@ function Content() {
         children: [
             jsx("style", { children: TAB_CSS }),
             jsx(DFL.Tabs, {
-                activeTab: tab,
+                activeTab: tabs.some((t) => t.id === tab) ? tab : "power",
                 onShowTab: pickTab,
                 tabs: tabs.map((t) => ({
                     id: t.id,
@@ -889,7 +1038,7 @@ var index = definePlugin(() => {
         if (!shortFpsWanted() || applyShortFps(true) || ++shortFpsTries > 30) clearInterval(shortFpsTimer);
     }, 2000);
     return {
-        name: "Handheld Control",
+        name: "Zaviya Control",
         content: jsx(Content, {}),
         icon: jsx("div", { style: { fontWeight: 800 }, children: "H" }),
         alwaysRender: false,

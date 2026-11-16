@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a flashable SteamOS ARM image for one SoC (SOC=sm8650 default, sm8550 or sm8250):
+# Build a flashable Zaviya image for one SoC (SOC=sm8650 default, sm8550 or sm8250):
 #   sm8650: KONKR Pocket FIT / AYANEO Pocket S2
 #   sm8550: AYN Odin 2 / Mini / Portal / Thor, AYANEO Pocket ACE / DMG / DS /
 #           EVO / S 1K / S 2K, Retroid Pocket 6 / Nova
@@ -25,9 +25,9 @@ OVL="${ROOT}/steamos-overlay"
 SOC="${SOC:-sm8650}"
 export SOC   # apply-overlays: 8 Gen 2-only files
 case "$SOC" in
-  sm8650) _kdef="${WORKDIR}/kernel-release/current" ;;
+  sm8650) _kdef="${WORKDIR}/kernel-sm8650/output/current" ;;
   sm8550)
-    if [[ "${SM8550_KERNEL:-prebuilt}" == prebuilt ]]; then
+    if [[ "${SM8550_KERNEL:-rocknix}" == prebuilt ]]; then
       _kdef="${WORKDIR}/kernel-prebuilt/7.0.14-edge-sm8550"
     else
       _kdef="${WORKDIR}/kernel-sm8550/output/current"
@@ -39,11 +39,8 @@ esac
 # kernels so the same rootfs carries every SoC's modules.
 KOUT="${IMAGE_KERNEL_OUT:-${_kdef}}"
 export KERNEL_OUT="${KERNEL_OUT:-${KOUT}}"
-# 8 Gen 2: our Mesa with the Adreno 740 fixes (scripts/build-mesa.sh). The
-# 865 (Adreno 650) takes the same build.
-if [[ "$SOC" == sm8550 || "$SOC" == sm8250 ]]; then
-  export MESA_STACK="${MESA_STACK:-${WORKDIR}/mesa/out}"
-fi
+# Our Mesa (scripts/build-mesa.sh) on every chip this script builds.
+export MESA_STACK="${MESA_STACK:-${WORKDIR}/mesa/out}"
 BOX64_SRC="${BOX64_SRC:-${MOD}/BOX64/box64}"
 BOX64_BUILD="${BOX64_BUILD:-/tmp/box64-build-frame}"
 IMG="${STEAMOS_SM8650_IMG:-${WORKDIR}/steamos-${SOC}.img}"
@@ -112,8 +109,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-STEAMOS_BUILD="${STEAMOS_BUILD:-20261002.6232440}"
-STEAMOS_BUNDLE="deckard-${STEAMOS_BUILD}-${STEAMOS_VERSION:-0.5.3}"
+STEAMOS_BUILD="${STEAMOS_BUILD:-20261104.6131433}"
+STEAMOS_BUNDLE="deckard-${STEAMOS_BUILD}-${STEAMOS_VERSION:-0.6.0}"
 STEAMOS_URL="https://steamdeck-images.steamos.cloud/vr/${STEAMOS_BUILD}"
 
 ensure_official_rootfs() {
@@ -365,9 +362,9 @@ build_image() {
       --exclude=dev --exclude=tmp --exclude=run --exclude='.image-mnt' \
       "${R}" | awk '{print $1}')"
     # ~500 MiB free after 1% reserved blocks + a little slack for first boot.
-    # 1.5 GiB free at pack: 500 MiB filled on first boot last time (root 100%).
-    ROOT_MIB=$((used_mib + 1536 + used_mib / 100 + 128))
-    log "root auto-size ${ROOT_MIB} MiB (rootfs ${used_mib} MiB, ~1.5 GiB free)"
+    # 4 GiB free at pack: root fills up for users (only home grows on first boot).
+    ROOT_MIB=$((used_mib + 4096 + used_mib / 100 + 128))
+    log "root auto-size ${ROOT_MIB} MiB (rootfs ${used_mib} MiB, ~4 GiB free)"
   fi
   if [[ "${AUTO_HOME}" -eq 1 ]]; then
     local home_mib
@@ -460,7 +457,7 @@ EOF
   # SteamOS mounts /etc from the overlay. Write both layers so first boot
   # actually uses this 3-partition layout (and home can grow).
   sudo_run tee "${MNT}/root/etc/fstab" >/dev/null <<EOF
-# SteamOS ARM (${SOC}) — PC/handheld layout (not Steam Deck A/B)
+# Zaviya (${SOC}) — PC/handheld layout (not Steam Deck A/B)
 UUID=${root_uuid}  /      ext4  defaults,noatime                         0 1
 LABEL=BOOT         /boot  vfat  defaults,umask=0077,nofail               0 2
 UUID=${home_uuid}  /home  ext4  defaults,noatime,commit=30,x-systemd.growfs 0 2
@@ -474,9 +471,10 @@ EOF
   # vfat cannot store Unix owner/mode — cp -a fails with EPERM
   sudo_run install -m0644 "${ktmp}" "${MNT}/boot/KERNEL"
   sudo_run bash -c "cd '${MNT}/boot' && md5sum KERNEL > KERNEL.md5"
+  sudo_run python3 "${ROOT}/steamos-overlay/usr/lib/steamos-arm/kernel-efi-sync" --boot "${MNT}/boot" --force
   # Optional second kernel on BOOT for testers to swap in by renaming
   # (TEST_KERNEL_OUT; its modules must be in KERNEL_OUT too). SM8550: our own
-  # ROCKNIX build by default, so it gets the ROCKNIX cmdline; set
+  # source build by default, so it gets the source-build cmdline; set
   # TEST_SM8550_KERNEL=prebuilt when the spare one is the prebuilt 7.0.14.
   if [[ -n "${TEST_KERNEL_OUT:-}" ]]; then
     local ttmp
@@ -506,10 +504,10 @@ EOF
 ABL reads KERNEL from this FAT partition.
 Do not rename KERNEL. After flashing to a bigger card, home grows on first boot.
 root=PARTUUID=${disk_id}-02
-ABL (ROCKNIX ABL for ${SOC^^}): Set device model -> your handheld.
-To install or update the ABL from Android, see rocknix_abl/README.txt.
+OpenABL: Set device model -> your handheld.
+To install or update it from Android, see openabl/README.txt.
 EOF
-  sudo_run env STEAMOS_WORK="${STEAMOS_WORK:-/work}" bash "${ROOT}/scripts/stage-rocknix-abl.sh" "${MNT}/boot" "${SOC}"
+  sudo_run env STEAMOS_WORK="${STEAMOS_WORK:-/work}" bash "${ROOT}/scripts/stage-openabl.sh" "${MNT}/boot" "${SOC}"
   # Lenovo tablet boot files (the image on a USB drive starts it there):
   # TB321FU_KERNEL_OUT is that tablet's kernel output.
   if [[ -n "${TB321FU_KERNEL_OUT:-}" ]]; then

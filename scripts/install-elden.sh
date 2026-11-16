@@ -53,7 +53,7 @@ install -Dm0644 /dev/stdin "$R/usr/lib/udev/rules.d/90-steamos-arm-elden-touch.r
 # Lenovo Legion Y700 Gen 4: the touch panel reports portrait coordinates, Game Mode runs landscape.
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitiveTouchScreen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 1 0 -1 0 1"
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitivePen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 1 0 -1 0 1"
-# Screen flipped 180 degrees (Handheld Control, /etc/steamos-arm/flip-screen): the other landscape.
+# Screen flipped 180 degrees (Zaviya Control, /etc/steamos-arm/flip-screen): the other landscape.
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitiveTouchScreen", TEST=="/etc/steamos-arm/flip-screen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 -1 1 1 0 0"
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitivePen", TEST=="/etc/steamos-arm/flip-screen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 -1 1 1 0 0"
 RULES
@@ -139,6 +139,17 @@ O="${HERE}/../steamos-overlay"
 install -Dm0755 "$O/usr/lib/steamos-arm/tablet-charge-full" "$R/usr/lib/steamos-arm/tablet-charge-full"
 install -Dm0644 "$O/usr/lib/systemd/system/steamos-arm-tablet-charge-full.service" "$R/usr/lib/systemd/system/steamos-arm-tablet-charge-full.service"
 ln -sfn ../steamos-arm-tablet-charge-full.service "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-tablet-charge-full.service"
+install -Dm0755 "$O/usr/lib/steamos-arm/tablet-charge-keep" "$R/usr/lib/steamos-arm/tablet-charge-keep"
+install -Dm0644 "$O/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.service" "$R/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.service"
+install -Dm0644 "$O/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.timer" "$R/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.timer"
+mkdir -p "$R/usr/lib/systemd/system/timers.target.wants"
+ln -sfn ../steamos-arm-tablet-charge-keep.timer "$R/usr/lib/systemd/system/timers.target.wants/steamos-arm-tablet-charge-keep.timer"
+install -Dm0644 "$O/usr/lib/udev/rules.d/90-steamos-arm-tablet-charge-keep.rules" "$R/usr/lib/udev/rules.d/90-steamos-arm-tablet-charge-keep.rules"
+# The side port's USB-C switch sits on this bus: a charger plugged in while it
+# is runtime suspended warns "Transfer while suspended".
+install -Dm0644 /dev/stdin "$R/usr/lib/udev/rules.d/90-steamos-arm-elden-i2c-awake.rules" <<'RULES'
+ACTION=="add", SUBSYSTEM=="platform", KERNEL=="a94000.i2c", ATTR{power/control}="on"
+RULES
 # The firmware copy from Android (split firmware joined now).
 install -Dm0755 "$O/usr/lib/steamos-arm/tablet-firmware" "$R/usr/lib/steamos-arm/tablet-firmware"
 install -Dm0755 "$O/usr/lib/steamos-arm/tablet-firmware-boot" "$R/usr/lib/steamos-arm/tablet-firmware-boot"
@@ -149,6 +160,16 @@ for f in tablet-charger-hold tablet-backlight tablet-boot-watch; do
   install -Dm0755 "$O/usr/lib/steamos-arm/$f" "$R/usr/lib/steamos-arm/$f"
 done
 install -Dm0755 "$O/usr/lib/systemd/system-sleep/steamos-arm-sleep-stats" "$R/usr/lib/systemd/system-sleep/steamos-arm-sleep-stats"
+# Dual boot with ZUXOS: switch slots (Zaviya Control's Restart into ZUXOS),
+# and move SteamOS from the microSD card to internal storage next to ZUXOS.
+# The boot menu (ZUXOS / SteamOS on slot A) comes from a separate add-on bundle
+# (scripts/build-kshimc.sh); its sync service keeps the menu's SteamOS kernel
+# the one in boot_b.
+for f in tablet-slot tablet-dualboot-install tablet-bootmenu-install tablet-bootmenu-pack; do
+  install -Dm0755 "$O/usr/lib/steamos-arm/$f" "$R/usr/lib/steamos-arm/$f"
+done
+install -Dm0644 "$O/usr/lib/systemd/system/steamos-arm-tablet-bootmenu-sync.service" "$R/usr/lib/systemd/system/steamos-arm-tablet-bootmenu-sync.service"
+ln -sfn ../steamos-arm-tablet-bootmenu-sync.service "$R/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-tablet-bootmenu-sync.service"
 # Asleep or awake, power off before the battery runs flat: a sleeping
 # handheld at 0 % browns out and can boot-loop on the charger.
 install -Dm0755 "$O/usr/lib/systemd/system-sleep/steamos-arm-low-battery" "$R/usr/lib/systemd/system-sleep/steamos-arm-low-battery"
@@ -157,5 +178,13 @@ sed -i -e 's/^PercentageCritical=.*/PercentageCritical=6/' -e 's/^PercentageActi
 for u in steamos-arm-tablet-charger steamos-arm-tablet-backlight steamos-arm-tablet-boot-watch; do
   install -Dm0644 "$O/usr/lib/systemd/system/$u.service" "$R/usr/lib/systemd/system/$u.service"
   ln -sfn ../$u.service "$R/usr/lib/systemd/system/multi-user.target.wants/$u.service"
+done
+# Legion G9 2026 controller (3537:1136) on the Gen 4: the pad as a Steam Deck
+# controller, the tablet's haptics motors for rumble, and the controller's
+# firmware double-Home (a KEY_HOMEPAGE pulse) as Quick Access.
+E="${HERE}/../external-and-mods/elden/rootfs/usr/share/inputplumber"
+install -Dm0644 "$E/devices/05-lenovo-y700-gen4-g9-2026.yaml" "$R/usr/share/inputplumber/devices/05-lenovo-y700-gen4-g9-2026.yaml"
+for m in lenovo_legion_g9_2026 y700_g9_consumer; do
+  install -Dm0644 "$E/capability_maps/$m.yaml" "$R/usr/share/inputplumber/capability_maps/$m.yaml"
 done
 echo "[elden] firmware manifest, topology and audio profile installed"

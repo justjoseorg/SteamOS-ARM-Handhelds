@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# Boot initramfs for SteamOS-ARM-SM8650. Mounts the root, leaves the kernel
+# Boot initramfs for Zaviya. Mounts the root, leaves the kernel
 # log from this boot in bootlog.txt on the FAT boot partition (the only way
 # to diagnose a black screen without a serial console), then switch_roots.
 # konkr.bootlog_wait=N on the cmdline adds N extra 4-second log snapshots
@@ -16,6 +16,13 @@
 /bin/busybox --install -s /bin
 export PATH=/bin
 mount -t devtmpfs dev /dev
+# An initramfs built into the kernel (EMBED_INITRAMFS) replaces the default
+# one that has /dev/console, so the kernel started us with no stdio
+# ("unable to open an initial console"). devtmpfs has it now.
+# A failed exec redirect would kill init, so try the open in a subshell first.
+if [ ! -t 1 ] && (: </dev/console >/dev/console) 2>/dev/null; then
+  exec </dev/console >/dev/console 2>&1
+fi
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mkdir -p /boot /newroot
@@ -57,8 +64,8 @@ usb_shell() {
   mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409" \
     "$g/functions/acm.usb0" "$g/functions/ncm.usb0"
   echo 0x1d6b >"$g/idVendor"; echo 0x0104 >"$g/idProduct"
-  echo "SteamOS ARM" >"$g/strings/0x409/manufacturer"
-  echo "SteamOS ARM debug shell" >"$g/strings/0x409/product"
+  echo "Zaviya" >"$g/strings/0x409/manufacturer"
+  echo "Zaviya debug shell" >"$g/strings/0x409/product"
   # Windows rejects a gadget without a serial number string (Code 43,
   # "invalid serial number string descriptor").
   echo "steamos-arm-debug" >"$g/strings/0x409/serialnumber"
@@ -228,7 +235,12 @@ if [ -n "$rootdev" ] && mount -t ext4 -o rw "$rootdev" /newroot; then
     cp /bootdebug "$d/bootdebug" && chmod 0755 "$d/bootdebug"
     printf '[Unit]\nDescription=Copy boot logs to the FAT partition (debug)\nAfter=local-fs.target\n\n[Service]\nType=simple\nExecStart=/usr/lib/steamos-arm/bootdebug\n' > "$u/steamos-arm-bootdebug.service"
     ln -sf ../steamos-arm-bootdebug.service "$u/multi-user.target.wants/steamos-arm-bootdebug.service"
+    # The boot log instead of the animation.
+    mkdir -p "$u/zaviya-splash.service.d"
+    printf '[Unit]\nConditionPathExists=/nonexistent\n' >"$u/zaviya-splash.service.d/debug.conf"
+    echo 7 >/proc/sys/kernel/printk
   else
+    rm -f "/newroot/usr/lib/systemd/system/zaviya-splash.service.d/debug.conf"
     rm -f /newroot/usr/lib/systemd/system/multi-user.target.wants/steamos-arm-bootdebug.service \
       /newroot/usr/lib/systemd/system/steamos-arm-bootdebug.service
   fi

@@ -2,7 +2,7 @@
 # Lenovo Legion Y700 Gen 5 (TB323FU, SM8850, board "baldur") kernel: mainline
 # v7.3-rc4 with the board's patch series, device tree, config fragments and
 # the out-of-tree aw882xx speaker amplifier driver from
-# github.com/joonhoekim/tb323fu-linux (pinned in
+# the pinned port tree (see
 # external-and-mods/kernel-baldur/release.env), plus our SteamOS options
 # (kernel-common/steamos.config, kernel-baldur/steamos.config) and our startup
 # code built in (kernel-common/initramfs, root=PARTLABEL=steamos-gen5).
@@ -41,7 +41,7 @@ for p in "$P"/patches/*.patch; do
 done
 echo "applied $n board patches"
 # Ours on top (kernel-baldur/patches: ath12k 5 GHz scanning and TX during
-# scans, from github.com/mydanyi/armadaos-freedom), and the GPU off the
+# scans), and the GPU off the
 # board-temperature throttle in the built-in device tree.
 K="$ROOT/external-and-mods/kernel-baldur"
 for p in "$K"/patches/*.patch; do
@@ -56,7 +56,7 @@ echo '#include "baldur-sd-sdr50.dtsi"' >> "$dq/kaanapali-lenovo-baldur-display.d
 cp "$CPIO" "$W/build/initrd.cpio"
 cat "$ROOT/external-and-mods/kernel-common/steamos.config" "$ROOT/external-and-mods/kernel-baldur/steamos.config" \
   > "$W/build/steamos.fragment"
-mkdir -p "$W/build/frag"; cp "$P"/config/baldur.fragment "$P"/config/baldur-display.fragment "$W/build/frag/"
+mkdir -p "$W/build/frag"; cp "$P"/config/baldur.fragment "$P"/config/baldur-display.fragment "$P"/config/baldur-extra.fragment "$W/build/frag/"
 
 docker run --rm -v "$W/build:/build" -w /build/linux \
   -e KBUILD_BUILD_USER=steamos -e KBUILD_BUILD_HOST=builder ubuntu:24.04 bash -c '
@@ -64,17 +64,18 @@ docker run --rm -v "$W/build:/build" -w /build/linux \
     export DEBIAN_FRONTEND=noninteractive
     apt-get -qq update >/dev/null
     apt-get -qq install -y clang-18 lld-18 llvm-18 make bc bison flex libssl-dev libelf-dev python3 \
-      cpio kmod xz-utils zstd perl rsync device-tree-compiler >/dev/null
+      cpio kmod dwarves xz-utils zstd perl rsync device-tree-compiler >/dev/null
     for t in clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip llvm-readelf; do
       ln -sf /usr/bin/$t-18 /usr/local/bin/$t; done
     M="make ARCH=arm64 LLVM=1 O=/build/out"
     $M defconfig >/dev/null
     scripts/kconfig/merge_config.sh -m -O /build/out /build/out/.config \
       arch/arm64/configs/kaanapali-oneplus-infiniti_defconfig \
-      /build/frag/baldur.fragment /build/frag/baldur-display.fragment /build/steamos.fragment >/dev/null
+      /build/frag/baldur.fragment /build/frag/baldur-display.fragment /build/frag/baldur-extra.fragment /build/steamos.fragment >/dev/null
     $M olddefconfig >/dev/null
     for o in CONFIG_INITRAMFS_SOURCE=\"/build/initrd.cpio\" CONFIG_CMDLINE_FORCE=y CONFIG_OVERLAY_FS=y \
-             CONFIG_ANDROID_BINDERFS=y CONFIG_UNICODE=y CONFIG_DRM_PANEL_NOVATEK_NT36523=y; do
+             CONFIG_ANDROID_BINDERFS=y CONFIG_UNICODE=y CONFIG_DRM_PANEL_NOVATEK_NT36523=y \
+             CONFIG_ZRAM_BACKEND_ZSTD=y; do
       grep -qx "$o" /build/out/.config || { echo "config: $o did not stick"; exit 1; }
     done
     $M -j"$(nproc)" dtbs >/dev/null

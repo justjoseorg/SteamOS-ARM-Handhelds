@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Steam Gamepad UI OS-update hook (the same interface as Valve's script):
+# Steam Gamepad UI OS-update hook (the same interface as the stock script):
 #   check                           exit 0 and print the version when a newer
 #                                   release exists, 7 when up to date, 8 when
 #                                   one is already staged (with
@@ -102,6 +102,10 @@ for arg in "$@"; do
     --enable-duplicate-detection) dup=1 ;;
   esac
 done
+
+# Nothing is downloaded during Steam's first-run setup: there's no account yet,
+# and the user is still choosing a language and joining Wi-Fi.
+grep -qs '"AccountName"' "${STEAM_HOME}/.local/share/Steam/config/loginusers.vdf" || exit 7
 
 AGENT=/usr/lib/steamos-arm/update-agent
 KU=/usr/share/konkr-update/konkr-update.py

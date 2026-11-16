@@ -13,16 +13,19 @@
 #   Image-gen5             the kernel (the installer packs it into the owner's
 #                          own boot image)
 #   install-gen5.sh, boot-repack.py, firmware.tsv, switch-to-steamos/
+# Env: KO (kernel output; SKIP_KERNEL=1 uses one already built), LAD, M, CPIO,
+# CONSUME_BASE=1 (deletes BASE once unpacked), ARCHIVE (archive name; default ...-v1.3.0-test<N>.7z) and ARCHIVE_DIR (where
+# it goes; default next to OUT_DIR).
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE="${1:?base userdata.simg}"; O="${2:?out dir}"; N="${3:?test number}"
-KO=/work/kernel-baldur/kout; LAD=/work/kernel-baldur/ladspa; M=/mnt/gen5
+KO="${KO:-/work/kernel-baldur/kout}"; LAD="${LAD:-/work/kernel-baldur/ladspa}"; M="${M:-/mnt/gen5}"
 fail() { echo "CHECK FAILED: $*"; mountpoint -q $M && umount $M; exit 1; }
 umount $M 2>/dev/null || true; mkdir -p $M
 cd "$SRC"
 
 echo "== kernel $(date +%T)"
-cpio=/work/kernel-elden/initramfs/initrd.cpio
+cpio="${CPIO:-/work/kernel-elden/initramfs/initrd.cpio}"
 grep -aq "microSD dual boot" "$cpio" || fail "initramfs without root=/dev support (rebuild kernel-elden first)"
 if [ -z "${SKIP_KERNEL:-}" ]; then
   bash scripts/build-baldur-kernel.sh $KO "$cpio" > /work/kbaldur.log 2>&1 || { tail -40 /work/kbaldur.log; fail "kernel"; }
@@ -42,6 +45,7 @@ echo "== system $(date +%T)"
 if [ -z "${CHECKS_ONLY:-}" ]; then
 rm -rf "$O"; mkdir -p "$O"
 simg2img "$BASE" "$O/fs.img"
+[ -z "${CONSUME_BASE:-}" ] || rm -f "$BASE"   # CONSUME_BASE=1: the base is not needed again (short of disk)
 mount -o loop "$O/fs.img" $M
 R=$M
 bash scripts/install-baldur.sh $R $KO $LAD
@@ -77,8 +81,22 @@ for u in steamos-arm-tablet-backlight steamos-arm-tablet-boot-watch steamos-arm-
   install -Dm0644 $OV/usr/lib/systemd/system/$u.service $R/usr/lib/systemd/system/$u.service
   ln -sfn ../$u.service $R/usr/lib/systemd/system/multi-user.target.wants/$u.service
 done
+# Return to Gaming Mode saves Game Mode as the default and ignores a second tap (BUGS S28).
+install -m0644 $OV/etc/skel/Desktop/Return.desktop $R/etc/skel/Desktop/Return.desktop
+install -m0644 $OV/etc/skel/Desktop/Return.desktop $R/usr/share/applications/steamos-gamemode.desktop
+install -Dm0755 $OV/etc/skel/Desktop/Return.desktop $R/home/steamos/Desktop/Return.desktop
+chown -R 1000:1000 $R/home/steamos/Desktop
+# zram, swappiness, TEO, remote play buffer, backlight untag (the 8 Elite
+# base never had them).
+for f in usr/lib/systemd/zram-generator.conf.d/60-steamos-arm-zram.conf \
+         usr/lib/tmpfiles.d/steamos-arm-cpuidle-teo.conf \
+         usr/lib/sysctl.d/60-steamos-arm-net-rmem.conf \
+         usr/lib/sysctl.d/61-steamos-arm-zram.conf \
+         usr/lib/udev/rules.d/99-zz-steamos-arm-backlight-untag.rules; do
+  install -Dm0644 $OV/$f $R/$f
+done
 HC=$(find $M -maxdepth 6 -type d -path "*homebrew/plugins/konkr-control" | head -1)
-[ -n "$HC" ] || fail "Handheld Control"
+[ -n "$HC" ] || fail "Zaviya Control"
 install -m0644 external-and-mods/Decky/sm8650/konkr-control/main.py $HC/main.py
 install -m0644 external-and-mods/Decky/sm8650/konkr-control/dist/index.js $HC/dist/index.js
 chown -R 1000:1000 $HC
@@ -115,6 +133,8 @@ grep -q "def rescan" $R/usr/lib/steamos-arm/gen5-emergency-key || fail "emergenc
 grep -q host-reconcile $R/usr/libexec/tb323fu/tb323fu-usb-port && [ -f $R/usr/lib/udev/rules.d/71-tb323fu-usb-host.rules ] || fail "USB-C routing"
 grep -q fail_safe $R/usr/libexec/tb323fu/tb323fu-speaker-gain || fail "speaker gain"
 [ -f $R/usr/share/inputplumber/devices/05-lenovo-tb323fu-legion-g9-2026.yaml ] && [ -f $R/usr/share/inputplumber/capability_maps/lenovo_legion_g9_2026.yaml ] || fail "G9 2026"
+grep -q "compression-algorithm = zstd" $R/usr/lib/systemd/zram-generator.conf.d/60-steamos-arm-zram.conf && grep -q "swappiness = 150" $R/usr/lib/sysctl.d/61-steamos-arm-zram.conf || fail "zram"
+grep -q qdbus6 $R/home/steamos/Desktop/Return.desktop && grep -q qdbus6 $R/usr/share/applications/steamos-gamemode.desktop || fail "Return to Gaming Mode"
 [ -L $R/etc/systemd/system/multi-user.target.wants/inputplumber.service ] || [ -L $R/usr/lib/systemd/system/multi-user.target.wants/inputplumber.service ] || fail "InputPlumber not enabled"
 echo "system checks ok"
 sync; umount $M
@@ -138,7 +158,8 @@ cp $KO/boot/Image "$O/Image-gen5"
 cp scripts/gen5/install-gen5.sh scripts/gen5/boot-repack.py external-and-mods/baldur/firmware.tsv "$O/"
 cp -r external-and-mods/baldur/switch-to-steamos "$O/"
 cd "$O"; sha256sum Image-gen5 steamos-gen5-card.img > SHA256SUMS; cat SHA256SUMS
-f=steamos-arm-port-lenovo-legion-y700-gen5-v1.3.0-test$N.7z
-rm -f ../$f; 7z a -mx=3 -mmt=8 ../$f Image-gen5 steamos-gen5-card.img install-gen5.sh boot-repack.py firmware.tsv switch-to-steamos SHA256SUMS >/dev/null
-cd ..; sha256sum $f | tee $f.sha256; ls -l $f
+f="${ARCHIVE:-zaviya-lenovo-legion-y700-gen5-v1.3.0-test$N.7z}"
+AD="${ARCHIVE_DIR:-..}"; mkdir -p "$AD"; AD=$(cd "$AD" && pwd)
+rm -f "$AD/$f"; 7z a -mx=3 -mmt=8 "$AD/$f" Image-gen5 steamos-gen5-card.img install-gen5.sh boot-repack.py firmware.tsv switch-to-steamos SHA256SUMS >/dev/null
+cd "$AD"; sha256sum $f | tee $f.sha256; ls -l $f
 echo "==> done $(date +%T)"

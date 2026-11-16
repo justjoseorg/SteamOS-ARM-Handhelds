@@ -12,7 +12,7 @@ R="${STEAMOS_ROOTFS:-${WORKDIR}/rootfs}"
 MOD="${ROOT}/external-and-mods"
 OVL="${ROOT}/steamos-overlay"
 SM8750_OVL="${ROOT}/sm8750-overlay"
-KOUT="${KERNEL_OUT:-${WORKDIR}/kernel-sm8750-release/7.2.0}"
+KOUT="${KERNEL_OUT:-${WORKDIR}/kernel-sm8750/output/current}"
 IMG="${STEAMOS_SM8750_IMG:-${WORKDIR}/steamos-odin3.img}"
 MNT="${WORKDIR}/.image-mnt"
 LOOPDEV=""
@@ -75,11 +75,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-STEAMOS_BUILD="${STEAMOS_BUILD:-20261002.6232440}"
-STEAMOS_BUNDLE="deckard-${STEAMOS_BUILD}-${STEAMOS_VERSION:-0.5.3}"
+STEAMOS_BUILD="${STEAMOS_BUILD:-20261104.6131433}"
+STEAMOS_BUNDLE="deckard-${STEAMOS_BUILD}-${STEAMOS_VERSION:-0.6.0}"
 STEAMOS_URL="https://steamdeck-images.steamos.cloud/vr/${STEAMOS_BUILD}"
 
-# SM8750_KERNEL=prebuilt (default): ROCKNIX's binary release, no tracefs.
+# SM8750_KERNEL=prebuilt (default): the base binary release, no tracefs.
 # SM8750_KERNEL=source: build via kernel-sm8750/build.sh, has tracefs.
 # Needs a native aarch64 host (e.g. the Odin 3 itself).
 ensure_kernel() {
@@ -95,12 +95,12 @@ ensure_kernel() {
     KOUT="$(readlink -f "$kcur")"
     return 0
   fi
-  if [[ -f "${KOUT}/boot/KERNEL" && -d "${KOUT}/modules/7.2.0" ]]; then
+  if [[ -f "${KOUT}/boot/KERNEL" && -n "$(ls -A "${KOUT}/modules" 2>/dev/null)" ]]; then
     log "SM8750 kernel already staged in ${KOUT}"
     return 0
   fi
-  log "Staging SM8750 kernel from ROCKNIX release"
-  "${MOD}/kernel-sm8750/extract-rocknix.sh" "${KOUT}"
+  log "Staging SM8750 kernel from the base release"
+  "${MOD}/kernel-sm8750/extract-base-release.sh" "${KOUT}"
 }
 
 ensure_official_rootfs() {
@@ -114,7 +114,7 @@ ensure_official_rootfs() {
   mkdir -p "${dl}"
   img="${dl}/rootfs.img"
   if [[ ! -s "${dl}/bundle/rootfs.img.caibx" ]]; then
-    log "Fetching Valve RAUC bundle ${STEAMOS_BUNDLE}"
+    log "Fetching RAUC bundle ${STEAMOS_BUNDLE}"
     curl -fL -o "${dl}/${STEAMOS_BUNDLE}.raucb" "${STEAMOS_URL}/${STEAMOS_BUNDLE}.raucb"
     rm -rf "${dl}/bundle"
     unsquashfs -q -d "${dl}/bundle" "${dl}/${STEAMOS_BUNDLE}.raucb"
@@ -160,6 +160,7 @@ apply_mods() {
     MESA_STACK="${MESA_STACK:-}" ${STEAM_ARM_SEED:+STEAM_ARM_SEED="${STEAM_ARM_SEED}"} \
     ${GAMESCOPE_BUILD:+GAMESCOPE_BUILD="${GAMESCOPE_BUILD}"} \
     ${KDE_EXTRAS:+KDE_EXTRAS="${KDE_EXTRAS}"} \
+    ${KEEP_ANDROID_MESA:+KEEP_ANDROID_MESA="${KEEP_ANDROID_MESA}"} \
     "${SCRIPTS}/apply-overlays-sm8750.sh"
 }
 
@@ -260,8 +261,8 @@ build_image() {
       --exclude=home --exclude=boot --exclude=proc --exclude=sys \
       --exclude=dev --exclude=tmp --exclude=run --exclude='.image-mnt' \
       "${R}" | awk '{print $1}')"
-    ROOT_MIB=$((used_mib + 1536 + used_mib / 100 + 128))
-    log "root auto-size ${ROOT_MIB} MiB (rootfs ${used_mib} MiB, ~1.5 GiB free)"
+    ROOT_MIB=$((used_mib + 4096 + used_mib / 100 + 128))
+    log "root auto-size ${ROOT_MIB} MiB (rootfs ${used_mib} MiB, ~4 GiB free)"
   fi
   if [[ "${AUTO_HOME}" -eq 1 ]]; then
     local home_mib
@@ -330,11 +331,12 @@ EOF
     repack_kernel_partuuid "${KOUT}/boot/KERNEL" "${MNT}/boot/KERNEL" "${disk_id}-02"
   sudo_run cp "${MNT}/boot/KERNEL" "${MNT}/boot/boot/KERNEL"
   sudo_run bash -c "cd '${MNT}/boot' && md5sum KERNEL | tee KERNEL.md5 boot/KERNEL.md5 >/dev/null"
+  sudo_run python3 "${ROOT}/steamos-overlay/usr/lib/steamos-arm/kernel-efi-sync" --boot "${MNT}/boot" --force
   if [[ -f "${MOD}/kernel-sm8750/post-flash.sh" ]]; then
     sed "s/@ROOT_UUID@/${root_uuid}/" "${MOD}/kernel-sm8750/post-flash.sh" \
       | sudo_run tee "${MNT}/boot/post-flash.sh" "${MNT}/boot/boot/post-flash.sh" >/dev/null
   fi
-  sudo_run env STEAMOS_WORK="${STEAMOS_WORK:-/work}" bash "${ROOT}/scripts/stage-rocknix-abl.sh" "${MNT}/boot" sm8750
+  sudo_run env STEAMOS_WORK="${STEAMOS_WORK:-/work}" bash "${ROOT}/scripts/stage-openabl.sh" "${MNT}/boot" sm8750
   # Lenovo tablet boot files (the image on a USB drive starts it there):
   # ELDEN_KERNEL_OUT is that tablet's kernel output.
   if [[ -n "${ELDEN_KERNEL_OUT:-}" ]]; then
@@ -370,7 +372,7 @@ EOF
   trap - EXIT INT TERM
 
   log "================================================================="
-  log "SUCCESS: SteamOS ARM for AYN Odin 3 built:"
+  log "SUCCESS: Zaviya for AYN Odin 3 built:"
   log "Image: ${IMG} ($((total_mib)) MiB)"
   log "Flash to microSD with: sudo dd if=${IMG} of=/dev/sdX bs=4M status=progress"
   log "Boot instructions: Hold Volume Down -> Boot Mode: Linux -> START"

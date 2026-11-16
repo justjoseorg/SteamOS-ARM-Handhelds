@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""konkrd — KONKR Pocket FIT platform daemon (SteamOS-ARM-SM8650).
+"""konkrd — KONKR Pocket FIT platform daemon (Zaviya).
 
 Fixes the platform-side gaps that make Linux slower than Android on this
 handheld and wires up the extra buttons:
 
-  fan      ROCKNIX pins the pwm-fan at 70/255 forever (0500-set-boot-fanspeed)
+  fan      The stock DT pins the pwm-fan at 70/255 forever (0500-set-boot-fanspeed)
            and the DT trips are not bound to it, so the SoC heat-soaks and
            LMh throttles CPU/GPU. konkrd runs a real temperature curve.
   profiles silent / balanced / turbo: fan curve, GPU floor/ceiling, how hard
@@ -159,7 +159,7 @@ def load_conf() -> configparser.ConfigParser:
 
 
 # ------------------------------------------------------------------ fan ----
-# pwmfan: ROCKNIX DT fans (Pocket FIT, SM8550). nx669j_fan: REDMAGIC 6 fan MCU.
+# pwmfan: stock DT fans (Pocket FIT, SM8550). nx669j_fan: REDMAGIC 6 fan MCU.
 FAN_HWMON_NAMES = ("pwmfan", "nx669j_fan")
 
 
@@ -271,7 +271,7 @@ def curve_pwm(curve, temp: float) -> int:
 # hunting. Only DANGER_C skips the ramp.
 FAN_STEP_S = 3.0
 FAN_QUANTUM = 8
-# Reaction (Handheld Control): (smoothing, most up, most down) per step.
+# Reaction (Zaviya Control): (smoothing, most up, most down) per step.
 FAN_REACTION = {
     "gentle":  (0.6, 20, 4),
     "calm":    (0.5, 36, 6),
@@ -299,7 +299,7 @@ STANDBY_HOT_PWM = 128
 
 def game_fan(st: dict) -> dict | None:
     """The fan settings in force: the running game's own (state "fan_games",
-    set in Handheld Control) over the global ones. A game entry is either
+    set in Zaviya Control) over the global ones. A game entry is either
     {"curve": "silent"|"balanced"|"turbo"} or {"mode": "fixed", "fixed": n};
     fan boost still wins."""
     glob_fan = {**(st.get("fan") or {}), "curves": st.get("fan_curves") or {}}
@@ -322,7 +322,7 @@ def on_charger() -> bool:
 
 
 def custom_curve(points) -> list | None:
-    """A curve from Handheld Control ([temp °C, speed %] pairs) as pwm
+    """A curve from Zaviya Control ([temp °C, speed %] pairs) as pwm
     points, sorted, with the speed never dropping as the temperature rises."""
     try:
         pts = sorted((max(20, min(105, int(t))), max(0, min(100, int(p)))) for t, p in points)
@@ -408,7 +408,7 @@ class Fan:
                 log(f"fan: fixed {fan.get('fixed')}% -> pwm {step}")
                 self.cur = step
             return
-        # a game's own curve or one picked in Handheld Control, else the
+        # a game's own curve or one picked in Zaviya Control, else the
         # profile's; boost wins over both
         name = "turbo" if fan.get("boost") else fan.get("curve") or profile
         curve = fan_curve(name, fan.get("curves") or {}) or FAN_CURVES[profile]
@@ -447,7 +447,7 @@ class Fan:
             self.cur = want
 
     def status(self, name: str, target: int) -> None:
-        """What the fan is doing, for Handheld Control's graph."""
+        """What the fan is doing, for Zaviya Control's graph."""
         try:
             os.makedirs(os.path.dirname(FAN_STATUS), exist_ok=True)
             with open(FAN_STATUS + ".tmp", "w", encoding="utf-8") as fh:
@@ -515,7 +515,7 @@ def fanless() -> bool:
 
 
 def apply_cpu(profile: str) -> None:
-    """schedutil everywhere (the ROCKNIX default is `performance`, which
+    """schedutil everywhere (the stock default is `performance`, which
     holds all eight cores — little A520s included — at max clock: heat for
     nothing). Turbo pins only the big clusters to `performance`, except on a
     fanless tablet, where Turbo keeps only its higher GPU floor."""
@@ -550,7 +550,7 @@ def big_cpus() -> set[int]:
 
 
 # ------------------------------------------------------ per-game perf ----
-# Set per game in Handheld Control (state "perf_games", keyed by App ID):
+# Set per game in Zaviya Control (state "perf_games", keyed by App ID):
 # a profile of its own, CPU and GPU caps, the cores its threads may use and
 # their priority. Applied when the game starts, and at once when changed
 # while it runs; the profile's own values come back when it exits.
@@ -736,7 +736,7 @@ class GameBoost:
 WEBHELPER_SH = "/home/steamos/.local/share/Steam/steamrtarm64/steamwebhelper.sh"
 WEBHELPER_EXEC = 'exec taskset 0x7c $(pwd)/steamwebhelper "$@" &> ~/.steam/steam/logs/steamwebhelper.log'
 KONKR_CEF = (
-    "# SteamOS-ARM-SM8650: draw the Steam UI through ANGLE's Vulkan backend on\n"
+    "# Zaviya: draw the Steam UI through ANGLE's Vulkan backend on\n"
     "# Turnip directly. The default (ANGLE -> GL -> zink -> Vulkan) converts every\n"
     "# UI draw call twice on the CPU and made menus/game pages sluggish.\n"
     'KONKR_CEF_FLAGS="--use-gl=angle --use-angle=vulkan '
@@ -751,8 +751,8 @@ KONKR_CEF_OLD_EXEC = 'exec taskset 0x7c $(pwd)/steamwebhelper "$@" $KONKR_CEF_FL
 
 
 # The Adreno 740 GMU can wedge when a GPU interrupt wakes one of the little
-# cores out of power collapse (found by ArmadaOS). The kernel boots with
-# ROCKNIX's irqaffinity (little cores), so only the GPU/GMU interrupts move
+# cores out of power collapse. The kernel boots with
+# the stock irqaffinity (little cores), so only the GPU/GMU interrupts move
 # to the big cores, after boot. SM8550 only; the Pocket FIT's A750 is fine.
 GPU_IRQ_NAMES = ("gpu", "gmu", "hfi", "adreno", "kgsl")
 
@@ -1083,7 +1083,11 @@ SYSBTN_CODE = {"F13": "BTN_TRIGGER_HAPPY1", "F14": "BTN_TRIGGER_HAPPY5"}
 def ensure_sysbtn_map(st: dict) -> None:
     if "KONKR Pocket FIT" not in rd("/sys/firmware/devicetree/base/model"):
         return
-    text = rd(SYSBTN_MAP)
+    try:
+        with open(SYSBTN_MAP, encoding="utf-8") as fh:
+            text = fh.read()  # raw: rd() strips the final newline
+    except OSError:
+        return
     if not text:
         return
     out, changed = [], False
@@ -1093,6 +1097,8 @@ def ensure_sysbtn_map(st: dict) -> None:
         line = lines[i]
         out.append(line)
         for key, code in SYSBTN_CODE.items():
+            if key == "F14" and remap_choice(st, "perf") != "default":
+                continue    # the Performance button was given another job
             if f"event_code: {code}," in line and i + 2 < len(lines) and "target_event:" in lines[i + 1]:
                 want = (f"      gamepad: {{button: {SYSBTN_GAME[key]}}}"
                         if st.get("buttons", {}).get(key) == "game" else f"      keyboard: Key{key}")
@@ -1112,8 +1118,119 @@ def ensure_sysbtn_map(st: dict) -> None:
     except OSError as exc:
         log(f"sysbtn map: {exc}")
         return
-    subprocess.run(["systemctl", "try-restart", "inputplumber.service"], check=False)
+    restart_inputplumber()
     log("front buttons: " + ", ".join(f"{k}={st.get('buttons', {}).get(k, '?')}" for k in SYSBTN_CODE))
+
+
+# The two system buttons can be given another job in Handheld Control:
+#   steam  the Steam/home button (BTN_MODE on the USB pad in both pad modes,
+#          Guide by default: it opens the left menu in Game Mode)
+#   perf   the front-top-right Performance button (BTN_TRIGGER_HAPPY5 from the
+#          MCU link, F14 by default: it cycles the performance profile)
+# Only the target_event line of those entries is rewritten, and the allowlist
+# below is the only thing that can end up in the root-owned files. "default"
+# keeps the shipped line: for steam that is Guide, and the perf entry stays
+# with ensure_sysbtn_map, which owns its keyboard/"game" choice.
+REMAP_TARGET = {"start": "Start", "select": "Select", "steam": "Guide", "quickaccess": "QuickAccess"}
+REMAP_DEFAULT = {"steam": "Guide", "perf": None}
+REMAP_MAPS = {
+    "/etc/inputplumber/capability_maps.d/konkr_pocketfit_deck.yaml": {"steam": "BTN_MODE"},
+    "/etc/inputplumber/capability_maps.d/konkr_pocketfit_dinput.yaml": {"steam": "BTN_MODE"},
+    SYSBTN_MAP: {"perf": "BTN_TRIGGER_HAPPY5"},
+}
+REMAP_TARGET_LINE = re.compile(
+    r"^      (gamepad: \{button: [A-Za-z0-9]+\}|keyboard: Key[A-Za-z0-9]+)$")
+
+
+def remap_choice(st: dict, which: str) -> str:
+    """The saved choice for "steam" or "perf": a REMAP_TARGET key or "default"."""
+    raw = st.get("remap")
+    c = raw.get(which) if isinstance(raw, dict) else None
+    return c if c in REMAP_TARGET else "default"
+
+
+def remap_text(text: str, codes: dict, choice: dict) -> str | None:
+    """text with the entries found by their source event_code in `codes`
+    (name -> code) pointed at the chosen buttons. choice maps the name to
+    "default" or a REMAP_TARGET key; anything else raises ValueError. None if
+    an entry is missing, repeated or not shaped as shipped: the caller leaves
+    the file alone."""
+    want: dict[str, str | None] = {}
+    for name in codes:
+        c = choice.get(name, "default")
+        if not isinstance(c, str) or (c != "default" and c not in REMAP_TARGET):
+            raise ValueError(f"bad button choice for {name}: {c!r}")
+        want[name] = REMAP_DEFAULT[name] if c == "default" else REMAP_TARGET[c]
+    lines = text.split("\n")
+    hits: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        for name, code in codes.items():
+            if f"event_code: {code}," in line:
+                if name in hits:
+                    return None
+                hits[name] = i
+    if set(hits) != set(codes):
+        return None
+    for i in hits.values():
+        if i + 2 >= len(lines) or lines[i + 1].strip() != "target_event:" \
+                or not REMAP_TARGET_LINE.match(lines[i + 2]):
+            return None
+    for name, i in hits.items():
+        if want[name] is not None:
+            lines[i + 2] = f"      gamepad: {{button: {want[name]}}}"
+    return "\n".join(lines)
+
+
+def restart_inputplumber() -> None:
+    """Queue an InputPlumber restart without waiting for it: the main loop
+    must not stall on a service that takes seconds to stop and start."""
+    try:
+        subprocess.Popen(["systemctl", "--no-block", "try-restart", "inputplumber.service"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError as exc:
+        log(f"inputplumber restart: {exc}")
+
+
+def ensure_button_remap(st: dict) -> None:
+    """Apply the saved Steam/Performance button choice to the installed maps
+    (run at start and on every reload, so an update that replaces the files
+    is corrected). Queues an InputPlumber restart only if a file changed."""
+    if rd("/sys/firmware/devicetree/base/model").strip("\0 \n") != "KONKR Pocket FIT":
+        return
+    choice = {k: remap_choice(st, k) for k in REMAP_DEFAULT}
+    changed = []
+    for path, codes in REMAP_MAPS.items():
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            new = remap_text(text, codes, choice)
+        except (OSError, UnicodeDecodeError) as exc:
+            log(f"button remap: {path}: {exc}")
+            continue
+        if new is None:
+            log(f"button remap: {path} not as expected, left alone")
+            continue
+        if new == text:
+            continue
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(new)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            log(f"button remap: {path}: {exc}")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            continue
+        changed.append(path)
+    if changed:
+        restart_inputplumber()
+        log(f"system buttons: steam={choice['steam']}, perf={choice['perf']}")
 
 
 def ensure_gamepad_mode(conf: configparser.ConfigParser) -> None:
@@ -1394,6 +1511,7 @@ class Daemon:
         self.leds.apply_sticks(self.st)
         ensure_gamepad_mode(self.conf)
         ensure_sysbtn_map(self.st)
+        ensure_button_remap(self.st)
 
     def stop(self, *_):
         # On shutdown the device is off a few seconds later: the failsafe only
@@ -1597,6 +1715,7 @@ class Daemon:
                 self.leds.apply_sticks(self.st)
                 ensure_gamepad_mode(self.conf)
                 ensure_sysbtn_map(self.st)
+                ensure_button_remap(self.st)
             now = time.monotonic()
             if now >= next_ui_check:
                 next_ui_check = now + 60.0

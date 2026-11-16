@@ -19,16 +19,16 @@ build_cmdline() {
     nosoftlockup
     mem_sleep_default=s2idle
   )
-  if [[ "${CMDLINE_QUIET:-0}" == 1 ]]; then
+  if [[ "${CMDLINE_QUIET:-1}" == 1 ]]; then
     parts+=(quiet loglevel=0 systemd.show_status=0 rd.udev.log_level=0
             logo.nologo vt.global_cursor_default=0)
   else
     parts+=(console=tty0 loglevel=4)
   fi
   parts+=(
-    # ROCKNIX's init mounts these before post-flash.sh runs. By UUID when the
+    # The base's init mounts these before post-flash.sh runs. By UUID when the
     # image build knows them, so another card's or install's BOOT/home can't
-    # be picked (Armada boots the Odin 3 by UUID too).
+    # be picked.
     "boot=${boot_src}"
     "disk=${disk_src}"
     rw rootwait

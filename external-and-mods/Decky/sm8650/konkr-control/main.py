@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decky backend — Handheld Control (SteamOS-ARM handhelds).
+"""Decky backend — Zaviya Control.
 
 Thin front for the device daemon: konkrd (KONKR Pocket FIT, the 8 Gen 2
 devices) or odin3d (AYN Odin 3, KONKR Pocket FIT Elite). Every setting lives
@@ -25,6 +25,13 @@ DAEMON = "odin3d" if ODIN3D else "konkrd"
 BLACKLIST = "/etc/modprobe.d/konkr-mcu.conf"
 FLIP = "/etc/steamos-arm/flip-screen"
 REQUEST = "/run/konkrd/request"
+INSTALL_DIR = "/usr/share/zaviya-install"
+INSTALL_UNIT = "zaviya-install"
+INSTALL_LOG = "/run/zaviya-install.log"
+LOGS_SCRIPT = "/usr/lib/steamos-arm/steamos-arm-logs"
+USER = "steamos"
+USER_HOME = "/home/steamos"
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def gen5() -> bool:
@@ -45,6 +52,38 @@ def tablet() -> bool:
     except OSError:
         return False
     return any(c in compat for c in ("lenovo,tb321fu", "lenovo,elden", "lenovo,baldur"))
+
+
+def install_unsupported() -> bool:
+    """The installer runs from a microSD card or USB drive, and not on SM8250."""
+    if "qcom,sm8250" in rd("/sys/firmware/devicetree/base/compatible").split("\0") or gen5():
+        return True
+    src = subprocess.run(["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True).stdout.strip()
+    disk = subprocess.run(["lsblk", "-no", "PKNAME", src], capture_output=True, text=True).stdout.split("\n")[0].strip()
+    if not disk:
+        return True
+    return not (disk.startswith("mmcblk") or "/usb" in os.path.realpath(f"/sys/class/block/{disk}"))
+
+
+def unit_props() -> dict[str, str]:
+    out = subprocess.run(["systemctl", "show", INSTALL_UNIT, "-p", "LoadState,ActiveState,SubState,Result,ExecMainStatus"],
+                         capture_output=True, text=True).stdout
+    return dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+
+
+def last_log_line() -> str:
+    try:
+        with open(INSTALL_LOG, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))
+            tail = fh.read().decode(errors="replace")
+    except OSError:
+        return ""
+    # rsync redraws its progress line with \r
+    lines = [ANSI.sub("", ln).strip() for ln in re.split(r"[\r\n]", tail)]
+    return next((ln for ln in reversed(lines) if ln), "")
+
+
 PROFILES = ("silent", "balanced", "turbo")
 ACTIONS = ("profile-next", "rgb-next", "sticks-toggle", "fan-boost", "game", "none")
 
@@ -69,6 +108,7 @@ def load() -> dict[str, Any]:
     st.setdefault("power_led", True)
     st.setdefault("menu_clicks", True)
     st.setdefault("buttons", {"F13": "rgb-next", "F14": "profile-next"})
+    st.setdefault("remap", {"steam": "default", "perf": "default"})
     return st
 
 
@@ -81,6 +121,31 @@ BUILTIN_CURVES = {
     "balanced": [[55, 20], [72, 30], [78, 40], [84, 60], [90, 80], [96, 100]],
     "turbo": [[45, 20], [66, 30], [74, 40], [80, 60], [85, 80], [90, 100]],
 }
+# Steam button and Performance button (Pocket FIT). konkrd rewrites the
+# InputPlumber maps from the saved choice (its REMAP_TARGET); this is the
+# allowlist for the state file.
+REMAP_CHOICES = ("default", "start", "select", "steam", "quickaccess")
+REMAP_KEYS = ("steam", "perf")
+REMAP_MAPS = {
+    "/etc/inputplumber/capability_maps.d/konkr_pocketfit_deck.yaml": "BTN_MODE",
+    "/etc/inputplumber/capability_maps.d/konkr_pocketfit_dinput.yaml": "BTN_MODE",
+    "/etc/inputplumber/capability_maps.d/konkr_pocketfit_sysbtn.yaml": "BTN_TRIGGER_HAPPY5",
+}
+
+
+def remap_available() -> bool:
+    """All maps are installed with the entries konkrd edits."""
+    for path, code in REMAP_MAPS.items():
+        if f"event_code: {code}," not in rd(path):
+            return False
+    return True
+
+
+def clean_remap(raw: Any) -> dict[str, str]:
+    raw = raw if isinstance(raw, dict) else {}
+    return {k: raw[k] if raw.get(k) in REMAP_CHOICES else "default" for k in REMAP_KEYS}
+
+
 REACTIONS = ("gentle", "calm", "quick", "instant")
 MAX_CURVES = 8
 
@@ -265,7 +330,7 @@ def mode_of(st: dict[str, Any]) -> tuple[str, bool]:
 class Plugin:
     async def _main(self) -> None:
         self.watcher = asyncio.create_task(self._watch_mode())
-        decky.logger.info(f"Handheld Control ready ({DAEMON})")
+        decky.logger.info(f"Zaviya Control ready ({DAEMON})")
 
     async def _unload(self) -> None:
         self.watcher.cancel()
@@ -321,13 +386,17 @@ class Plugin:
             "game": game_fan_state(st),
             "power_led": st["power_led"],
             "menu_clicks": st["menu_clicks"],
+            "tablet": tablet(),
             "has_flip": tablet(),
+            # The Lenovo tablets have no fan: no Fan page, no fan choices per game.
+            "has_fan": not tablet(),
             "flip": os.path.exists(FLIP),
             # Tablets: SteamOS on the microSD card next to Android. Handhelds:
-            # OpenABL / ROCKNIX ABL, whose menu picks Android or Linux.
-            "has_dualboot": not tablet() or subprocess.run(["sh", "-c", "findmnt -no SOURCE / | grep -q mmcblk"]).returncode == 0,
+            # OpenABL, whose menu picks Android or Linux.
+            "has_dualboot": not tablet() or subprocess.run(["sh", "-c", "findmnt -no SOURCE / | grep -q mmcblk || "
+                                                            "[ \"$(lsblk -no PARTLABEL \"$(findmnt -no SOURCE /)\")\" = steamos ]"]).returncode == 0,
             "dualboot_label": ("Restart into ZUI" if gen5() else "Restart into ZUXOS") if tablet() else "Restart into Android",
-            "dualboot_text": ("SteamOS runs from the microSD card. This restarts into "
+            "dualboot_text": ("SteamOS runs next to Android. This restarts into "
                               + ("ZUI; to come back, use Switch to SteamOS in KernelSU" if gen5()
                                  else "ZUXOS; to come back, run fastboot set_active b")) if tablet() else
                              ("Restarts into the boot menu: choose Switch boot mode until it says Android, "
@@ -340,6 +409,8 @@ class Plugin:
             "has_mcu_link": fit and not ODIN3D,
             "has_breath": not ODIN3D and any(os.path.exists(f"{d}/effect") for d in leds),
             "fit_buttons": fit,
+            "remap": clean_remap(st.get("remap")),
+            "remap_available": fit and await asyncio.to_thread(remap_available),
             "mcu_enabled": not os.path.exists(BLACKLIST),
             "mcu_loaded": os.path.isdir("/sys/module/konkr_sysbtn"),
             "sticks_led": bool(leds),
@@ -521,6 +592,18 @@ class Plugin:
         save(st)
         return st["buttons"]
 
+    async def set_remap(self, button: str = "steam", choice: str = "default", **_: Any) -> dict:
+        """Steam button or Performance button: saved here, applied by konkrd
+        (it rewrites the InputPlumber maps and queues an InputPlumber restart
+        if they changed, on the HUP from save() and again at every start)."""
+        st = load()
+        if button in REMAP_KEYS and choice in REMAP_CHOICES:
+            remap = clean_remap(st.get("remap"))
+            remap[button] = choice
+            st["remap"] = remap
+            save(st)
+        return clean_remap(st.get("remap"))
+
     async def set_menu_clicks(self, on: bool = True, **_: Any) -> bool:
         st = load()
         st["menu_clicks"] = bool(on)
@@ -556,3 +639,88 @@ class Plugin:
         st["power_led"] = bool(on)
         save(st)
         return st["power_led"]
+
+    async def install_probe(self, **_: Any) -> dict[str, Any]:
+        """Sizes and state of the internal disk, from the installer's probe."""
+        if await asyncio.to_thread(install_unsupported):
+            return {"unsupported": True}
+        script = f"{INSTALL_DIR}/ufs-probe-sizes.sh"
+        if not os.path.isfile(script):
+            return {"error": "The installer is missing from this image"}
+        r = await asyncio.to_thread(subprocess.run, [script], capture_output=True, text=True)
+        out: dict[str, Any] = {}
+        for ln in r.stdout.splitlines():
+            if "=" in ln:
+                k, v = ln.split("=", 1)
+                out[k] = v
+        if r.returncode != 0 or "ERROR" in out:
+            return {"error": out.get("ERROR") or r.stderr.strip() or f"exit {r.returncode}"}
+        return out
+
+    async def install_start(self, android_gb: int = 0, home_mode: str = "all", fingerprint: str = "",
+                            reinstall: bool = False, **_: Any) -> dict[str, Any]:
+        """Runs the installer as a system unit, so it outlives Steam and this plugin."""
+        if home_mode not in ("all", "essentials", "none"):
+            return {"error": "Unknown choice for what to bring"}
+        if not re.fullmatch(r"[0-9a-f]{16}", str(fingerprint)):
+            return {"error": "No partition table to check against; reopen the panel"}
+        try:
+            android_gb = int(android_gb)
+        except (TypeError, ValueError):
+            return {"error": "Android size must be a whole number"}
+        if await asyncio.to_thread(install_unsupported):
+            return {"error": "Not supported here"}
+        props = await asyncio.to_thread(unit_props)
+        if props.get("LoadState") == "loaded" and props.get("ActiveState") in ("active", "activating") \
+                and props.get("SubState") in ("start", "running"):
+            return {"error": "An install is already running"}
+        # A finished unit is kept (--remain-after-exit) so its result can be read.
+        await asyncio.to_thread(subprocess.run, ["systemctl", "stop", INSTALL_UNIT], capture_output=True)
+        await asyncio.to_thread(subprocess.run, ["systemctl", "reset-failed", INSTALL_UNIT], capture_output=True)
+        try:
+            open(INSTALL_LOG, "w").close()
+        except OSError as e:
+            return {"error": str(e)}
+        size = ["--resume"] if reinstall else ["--android-gb", str(android_gb)]
+        r = await asyncio.to_thread(subprocess.run, [
+            "systemd-run", f"--unit={INSTALL_UNIT}", "--remain-after-exit",
+            f"--property=StandardOutput=append:{INSTALL_LOG}", f"--property=StandardError=append:{INSTALL_LOG}",
+            f"{INSTALL_DIR}/install-to-internal.sh", "--force", "--expect", fingerprint, "--home", home_mode, *size,
+        ], capture_output=True, text=True)
+        if r.returncode != 0:
+            return {"error": r.stderr.strip() or f"exit {r.returncode}"}
+        return {"ok": True}
+
+    async def install_status(self, **_: Any) -> dict[str, str]:
+        """idle: no unit. running, then done (exit 0) or failed. The unit stays
+        after it ends (--remain-after-exit) because --collect would drop a
+        failed one before its result could be read."""
+        p = await asyncio.to_thread(unit_props)
+        active, sub = p.get("ActiveState", ""), p.get("SubState", "")
+        if p.get("LoadState") != "loaded":
+            state = "idle"
+        elif active == "failed":
+            state = "failed"
+        elif active in ("active", "activating") and sub in ("start", "running"):
+            state = "running"
+        elif active == "active":
+            state = "done"
+        else:
+            state = "idle"
+        return {"state": state, "line": await asyncio.to_thread(last_log_line) if state != "idle" else ""}
+
+    async def record_logs(self, **_: Any) -> dict[str, str]:
+        """Run the log recorder as the steamos user, so the archive in its home
+        folder belongs to them. The plugin itself runs as root."""
+        try:
+            r = await asyncio.wait_for(asyncio.to_thread(
+                subprocess.run, ["runuser", "-u", USER, "--", "env", f"HOME={USER_HOME}", LOGS_SCRIPT],
+                capture_output=True, text=True), timeout=240)
+        except asyncio.TimeoutError:
+            return {"error": "Timed out"}
+        except OSError as e:
+            return {"error": str(e)}
+        lines = r.stdout.strip().splitlines()
+        if r.returncode != 0 or not lines:
+            return {"error": r.stderr.strip().splitlines()[-1] if r.stderr.strip() else f"exit {r.returncode}"}
+        return {"path": lines[-1]}

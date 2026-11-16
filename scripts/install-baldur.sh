@@ -85,8 +85,7 @@ for f in sc4_1882.so fast_lookahead_limiter_1913.so; do
 done
 # The audio topology (generated, in the board project).
 install -Dm0644 "$W/firmware/audio/LENOVO-TB323FU-tplg.bin" "$R/usr/lib/firmware/qcom/kaanapali/LENOVO-TB323FU-tplg.bin"
-# Newer than the board project's (external-and-mods/baldur/rootfs, from
-# github.com/mydanyi/armadaos-freedom): USB-C routing that keeps a real host
+# Newer than the board project's (external-and-mods/baldur/rootfs): USB-C routing that keeps a real host
 # (dock, PC) on the controller and doesn't drop a pad on the side port when
 # a charger goes in the bottom one, plus a re-check on every role change;
 # speaker gain that waits for the sound card and falls back to the safe
@@ -98,10 +97,23 @@ install -Dm0644 "$B/usr/lib/udev/rules.d/71-tb323fu-usb-host.rules" "$R/usr/lib/
 install -Dm0644 "$B/usr/lib/systemd/user/tb323fu-speaker-gain.service" "$R/usr/lib/systemd/user/tb323fu-speaker-gain.service"
 install -Dm0644 "$B/usr/share/inputplumber/devices/05-lenovo-tb323fu-legion-g9-2026.yaml" "$R/usr/share/inputplumber/devices/05-lenovo-tb323fu-legion-g9-2026.yaml"
 install -Dm0644 "$B/usr/share/inputplumber/capability_maps/lenovo_legion_g9_2026.yaml" "$R/usr/share/inputplumber/capability_maps/lenovo_legion_g9_2026.yaml"
+# Clock from the PMIC RTC plus a saved offset (it showed Jan 06 until NTP),
+# and tb323fu-btaddr started by udev when hci0 appears (its hci0.device wait
+# timed out at boot).
+install -Dm0755 "$B/usr/lib/steamos-arm/baldur-rtc-offset" "$R/usr/lib/steamos-arm/baldur-rtc-offset"
+for u in steamos-arm-baldur-rtc.service steamos-arm-baldur-rtc-save.service steamos-arm-baldur-rtc-save.timer; do
+  install -Dm0644 "$B/usr/lib/systemd/system/$u" "$R/usr/lib/systemd/system/$u"
+done
+ln -sfn ../steamos-arm-baldur-rtc.service "$R/usr/lib/systemd/system/sysinit.target.wants/steamos-arm-baldur-rtc.service" 2>/dev/null \
+  || { mkdir -p "$R/usr/lib/systemd/system/sysinit.target.wants"; ln -sfn ../steamos-arm-baldur-rtc.service "$R/usr/lib/systemd/system/sysinit.target.wants/steamos-arm-baldur-rtc.service"; }
+mkdir -p "$R/usr/lib/systemd/system/timers.target.wants"
+ln -sfn ../steamos-arm-baldur-rtc-save.timer "$R/usr/lib/systemd/system/timers.target.wants/steamos-arm-baldur-rtc-save.timer"
+install -Dm0644 "$B/usr/lib/systemd/system/tb323fu-btaddr.service.d/10-steamos-arm.conf" "$R/usr/lib/systemd/system/tb323fu-btaddr.service.d/10-steamos-arm.conf"
+install -Dm0644 "$B/usr/lib/udev/rules.d/72-steamos-arm-btaddr.rules" "$R/usr/lib/udev/rules.d/72-steamos-arm-btaddr.rules"
 log "platform files"
 
 # Switching, firmware from the card, growing to the card.
-for f in gen5-android gen5-emergency-key gen5-firstboot tablet-sd-grow tablet-charge-full; do
+for f in gen5-android gen5-emergency-key gen5-firstboot tablet-sd-grow tablet-charge-full tablet-charge-keep; do
   install -Dm0755 "$OV/usr/lib/steamos-arm/$f" "$R/usr/lib/steamos-arm/$f"
 done
 mkdir -p "$R/usr/lib/systemd/system/sysinit.target.wants" "$R/usr/lib/systemd/system/multi-user.target.wants"
@@ -113,6 +125,11 @@ for u in steamos-arm-gen5-emergency-key.service steamos-arm-tablet-sd-grow.servi
   install -Dm0644 "$OV/usr/lib/systemd/system/$u" "$R/usr/lib/systemd/system/$u"
   ln -sfn "../$u" "$R/usr/lib/systemd/system/multi-user.target.wants/$u"
 done
+install -Dm0644 "$OV/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.service" "$R/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.service"
+install -Dm0644 "$OV/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.timer" "$R/usr/lib/systemd/system/steamos-arm-tablet-charge-keep.timer"
+mkdir -p "$R/usr/lib/systemd/system/timers.target.wants"
+ln -sfn ../steamos-arm-tablet-charge-keep.timer "$R/usr/lib/systemd/system/timers.target.wants/steamos-arm-tablet-charge-keep.timer"
+install -Dm0644 "$OV/usr/lib/udev/rules.d/90-steamos-arm-tablet-charge-keep.rules" "$R/usr/lib/udev/rules.d/90-steamos-arm-tablet-charge-keep.rules"
 
 # What doesn't exist here or must not run: the Frame's and the Odin 3's own
 # hardware services, SteamOS's partition-set plumbing (home and EFI by
@@ -122,7 +139,7 @@ mask sm8750-audio-setup.service deckard-audio-setup.service deckard-fan-control.
   deckard-fpga-resume.service deckard-charger.service deckard-power-monitor.service setubootenv.service \
   softapmanager.service steam-video-codec-setup.service steamos-boot.service steamos-sm8550-expand-home.service \
   home.mount efi.mount esp.mount steamos-offload.target systemd-repart.service \
-  rmtfs.service tqftpserv.service ModemManager.service
+  rmtfs.service tqftpserv.service ModemManager.service home-swapfile.swap swapfile.service
 for u in "$R"/usr/lib/systemd/system/steamos-offload.target.wants/*.mount "$R"/etc/systemd/system/steamos-offload.target.wants/*.mount; do
   [[ -e "$u" || -L "$u" ]] && mask "$(basename "$u")"
 done
@@ -139,14 +156,14 @@ echo legion-y700-gen5 > "$R/etc/hostname"
 # Game Mode on the portrait panel (1904x3040): gamescope's rotation shader
 # turns it right, after the Odin 3's drop-in (99-odin3), and touch, which the
 # shader doesn't turn, gets a libinput matrix (measured for "right" on the
-# tablet by the board project). Flip screen (Handheld Control) turns both
+# tablet by the board project). Flip screen (Zaviya Control) turns both
 # the other way; KWin maps touch itself in Desktop Mode.
 mkdir -p "$R/etc/systemd/user/gamescope-session.service.d"
 printf '[Service]\nEnvironment=GAMESCOPE_ORIENTATION=right\n' > "$R/etc/systemd/user/gamescope-session.service.d/99-zz-gen5.conf"
 install -Dm0644 /dev/stdin "$R/usr/lib/udev/rules.d/90-steamos-arm-gen5-touch.rules" <<'RULES'
 # Lenovo Legion Y700 Gen 5: Game Mode runs the portrait panel landscape ("right").
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitiveTouchScreen|NVTCapacitivePen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 1 0 -1 0 1"
-# Screen flipped 180 degrees (Handheld Control, /etc/steamos-arm/flip-screen): the other landscape.
+# Screen flipped 180 degrees (Zaviya Control, /etc/steamos-arm/flip-screen): the other landscape.
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitiveTouchScreen|NVTCapacitivePen", TEST=="/etc/steamos-arm/flip-screen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 -1 1 1 0 0"
 RULES
 grep -qs 'Legion Y700 Gen 5' "$R/etc/xdg/kcminputrc" || cat >> "$R/etc/xdg/kcminputrc" <<'KCM'

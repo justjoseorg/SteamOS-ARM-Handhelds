@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ABL cmdline for SteamOS ARM. ABL picks the DTB by model, never put
+# ABL cmdline for Zaviya. ABL picks the DTB by model, never put
 # devicetree=/dtb= here. root must be PARTUUID (or /dev/…), the initramfs
 # does not resolve root=UUID=.
 #
@@ -15,7 +15,7 @@ build_cmdline() {
   local root="$1"
   [[ "$root" == *=* ]] || root="PARTUUID=${root}"
   [[ -n "${CMDLINE_SOC:-}" ]] || { echo "build_cmdline: source kernel-<soc>/soc.env first" >&2; return 1; }
-  # No clk_ignore_unused / pd_ignore_unused: ROCKNIX boots without them and
+  # No clk_ignore_unused / pd_ignore_unused: the base boots without them and
   # they can upset display bring-up.
   local -a parts=(video=efifb:off)
   local -a soc
