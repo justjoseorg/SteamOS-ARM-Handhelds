@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build signed .sau update packages for this fork from an upstream release image.
 #
-#   sudo fork-build-sau.sh <first .7z part> <soc> <version> <signing key.pem> <outdir>
+#   sudo fork-build-sau.sh <first .7z part or .img.zst> <soc> <version> <signing key.pem> <outdir>
 #
 # The image is extracted and mounted read-only; fork/overlay, fork/patches and
 # fork/hooks are applied on top through an overlayfs, so nothing upstream ships
@@ -9,7 +9,7 @@
 # the upstream ones. Needs root, 7z, patch, openssl and ~25 GB of scratch space.
 set -euo pipefail
 
-SRC="${1:?first .7z part}"; SOC="${2:?soc}"; VERSION="${3:?version}"
+SRC="${1:?first .7z part or .img.zst}"; SOC="${2:?soc}"; VERSION="${3:?version}"
 KEY="${4:?signing key}"; OUT="${5:?output dir}"
 REPO="${FORK_REPO:-${GITHUB_REPOSITORY:?set FORK_REPO=owner/name}}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,7 +30,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== extracting $(basename "$SRC")"
-7z x -o"$W" -y "$SRC" >/dev/null
+case "$SRC" in
+  *.img.zst) zstd -dq --sparse "$SRC" -o "$W/release.img" ;;
+  *.7z.001) 7z x -o"$W" -y "$SRC" >/dev/null ;;
+  *) echo "unsupported release image: $SRC" >&2; exit 1 ;;
+esac
 IMG=("$W"/*.img)
 [[ ${#IMG[@]} -eq 1 ]] || { echo "expected one .img in the archive" >&2; exit 1; }
 
@@ -58,9 +62,7 @@ echo "== applying fork changes"
 # The device checks updates against its own copy of the key, and update-agent
 # looks for releases in REPO.
 install -D -m 0644 "$FORK/signing.pub" "$R/usr/share/steamos-arm/update/signing.pub"
-AGENT="$R/usr/lib/steamos-arm/update-agent"
-sed -i "s|^REPO = .*|REPO = \"$REPO\"|" "$AGENT"
-grep -qx "REPO = \"$REPO\"" "$AGENT" || { echo "could not point update-agent at $REPO" >&2; exit 1; }
+PREFIX="$(python3 "$FORK/configure-update-agent.py" "$R" "$REPO")"
 if [[ -d "$FORK/overlay" ]]; then
   cp -a --no-preserve=ownership "$FORK/overlay/." "$R/"
 fi
@@ -71,7 +73,8 @@ for p in "$FORK"/patches/*.patch; do
 done
 for h in "$FORK"/hooks/*.sh; do
   echo "hook $(basename "$h")"
-  ROOTFS="$R" SOC="$SOC" VERSION="$VERSION" BOOT_KERNEL="$W/boot/KERNEL" FORK_KERNEL="$W/KERNEL.fork" bash "$h"
+  ROOTFS="$R" SOC="$SOC" VERSION="$VERSION" BOOT_KERNEL="$W/boot/KERNEL" FORK_KERNEL="$W/KERNEL.fork" \
+    FORK_UPSTREAM_KERNEL="$([[ "$PREFIX" == zaviya-arm ]] && echo 1 || echo 0)" bash "$h"
 done
 # A hook may replace the boot KERNEL (write it to $FORK_KERNEL).
 KERNEL="$W/boot/KERNEL"
@@ -80,4 +83,4 @@ KERNEL="$W/boot/KERNEL"
 echo "== building $SOC $VERSION"
 mkdir -p "$OUT"
 python3 "$HERE/scripts/build-update-v2.py" --rootfs "$R" --kernel "$KERNEL" --soc "$SOC" \
-  --version "$VERSION" --sign-key "$KEY" --output "$OUT/steamos-arm-$SOC-$VERSION.sau"
+  --version "$VERSION" --sign-key "$KEY" --output "$OUT/$PREFIX-$SOC-$VERSION.sau"

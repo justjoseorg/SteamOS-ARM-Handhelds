@@ -1,8 +1,19 @@
 # Fork layout
 
-This fork follows upstream (hashtagbasit/SteamOS-ARM-Port) and publishes its own
+This fork follows upstream (hashtagbasit/Zaviya) and publishes its own
 signed `.sau` update packages, so a device only ever updates from this fork's
 releases and always gets the newest upstream release plus the changes in `fork/`.
+
+**Zaviya 1.5 requires a fresh install.** Install upstream's 1.5 (or newer) image,
+then run `sudo bash fork/switch-device.sh` from this repository to trust the
+fork's key and enable its updates. Modern packages use `zaviya-arm-*.sau`;
+1.4 devices cannot discover those files as updates. Legacy packages keep the
+`steamos-arm-*.sau` names. Do not manually stage a modern package on 1.4.
+
+The job reads modern image names and hashes from the upstream release's
+`SHA256SUMS`, downloads attached images or the Zaviya download mirror, and verifies
+the image before extraction. It retains the modern image's kernel and gyro stack
+instead of replacing them with the fork's legacy 7.2 build.
 
 ```
 upstream release ──► fork-sau.yml ──► image + fork/ changes ──► signed .sau ──► this repo's Releases
@@ -31,6 +42,7 @@ Release `vX.Y.Z.N` is upstream `vX.Y.Z` revision `N`. A new upstream release sta
    (`~/.config/steamos-arm-release/update-signing.pem` on the machine that generated it).
 2. Enable Actions on the fork (scheduled workflows start disabled on forks).
 3. Optional secret `SYNC_TOKEN` (PAT with `repo` + `workflow`) so syncing can pull upstream workflow changes.
+   Without it, sync preserves this fork's managed workflows and dispatches package planning explicitly.
 4. On each device, once, as root: `bash fork/switch-device.sh` (it trusts the fork's key and points the updater here).
    After that, **SteamOS Update** finds the fork's releases.
 

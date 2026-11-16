@@ -7,6 +7,7 @@
 # Later fork releases carry the same changes, so this is only needed once.
 set -euo pipefail
 REPO="${1:-justjoseorg/SteamOS-ARM-Handhelds}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 AGENT=/usr/lib/steamos-arm/update-agent
 PUB=/usr/share/steamos-arm/update/signing.pub
@@ -24,6 +25,6 @@ MCowBQYDK2VwAyEAfbutDFp9G/UiUvKRAJSWTYpza661UNxrquy0w4vnLdE=
 -----END PUBLIC KEY-----
 KEY
 chmod 644 "$PUB"
-sed -i "s|^REPO = .*|REPO = \"$REPO\"|" "$AGENT"
+python3 "$HERE/configure-update-agent.py" / "$REPO"
 grep -qx "REPO = \"$REPO\"" "$AGENT"
 echo "Updates now come from $REPO (key backup: $PUB.upstream)"

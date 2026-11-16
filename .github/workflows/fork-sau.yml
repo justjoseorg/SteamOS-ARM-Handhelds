@@ -42,6 +42,9 @@ jobs:
       upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
       head: ${{ steps.plan.outputs.head }}
       socs: ${{ steps.plan.outputs.socs }}
+      images: ${{ steps.plan.outputs.images }}
+      prefix: ${{ steps.plan.outputs.prefix }}
+      upstream_kernel: ${{ steps.plan.outputs.upstream_kernel }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,20 +57,33 @@ jobs:
           REBUILD: ${{ inputs.rebuild }}
         run: |
           python3 scripts/test-fork-update-plan.py
+          python3 scripts/test-fork-update-agent.py
           python3 scripts/plan-fork-update.py
 
       - name: Create draft release
         if: steps.plan.outputs.build == 'true'
+        env:
+          PREFIX: ${{ steps.plan.outputs.prefix }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          HEAD: ${{ steps.plan.outputs.head }}
         run: |
-          tag=${{ steps.plan.outputs.tag }}
-          gh release delete "$tag" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
-          gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "${{ github.event.repository.default_branch }}" \
-            --title "$tag" --notes "SteamOS ARM Handhelds ${{ steps.plan.outputs.upstream_tag }} with this fork's changes. Install with SteamOS Update. Built from main@${{ steps.plan.outputs.head }}"
+          notes="Upstream $UPSTREAM_TAG with this fork's changes. Built from main@$HEAD. Automated build; not device-tested."
+          if [ "$PREFIX" = zaviya-arm ]; then
+            notes="$notes Requires a fresh-installed Zaviya 1.5+ system. Install upstream's image first, then run fork/switch-device.sh from this repository to enable these updates. This is NOT a 1.4-to-1.5 OTA upgrade."
+          else
+            notes="$notes Install with SteamOS Update."
+          fi
+          gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target "$HEAD" \
+            --title "$TAG" --notes "$notes"
 
   components:
     needs: prepare
     if: needs.prepare.outputs.build == 'true'
     uses: ./.github/workflows/fork-components.yml
+    with:
+      upstream_kernel: ${{ needs.prepare.outputs.upstream_kernel == 'true' }}
 
   package:
     needs: [prepare, components]
@@ -76,17 +92,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        soc: ${{ fromJSON(needs.prepare.outputs.socs) }}
+        include: ${{ fromJSON(needs.prepare.outputs.images) }}
     env:
       WORK: /mnt/sau
       VERSION: ${{ needs.prepare.outputs.version }}
       TAG: ${{ needs.prepare.outputs.tag }}
       UP_TAG: ${{ needs.prepare.outputs.upstream_tag }}
       SOC: ${{ matrix.soc }}
+      PREFIX: ${{ needs.prepare.outputs.prefix }}
+      IMAGE_FORMAT: ${{ matrix.format }}
+      IMAGE_NAME: ${{ matrix.name }}
+      IMAGE_URL: ${{ matrix.url }}
+      IMAGE_SHA256: ${{ matrix.sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ needs.prepare.outputs.head }}
 
       - name: Check the signing key
         env:
@@ -99,26 +120,37 @@ jobs:
             || { echo "::error::SAU_SIGNING_KEY does not match fork/signing.pub"; exit 1; }
 
       - name: Install tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full zstd
 
       - name: Download upstream image
         run: |
           # ~16 GB once extracted; /mnt is the runner's large scratch disk.
           sudo mkdir -p "$WORK/rel" "$WORK/out" && sudo chown -R "$USER" "$WORK"
-          gh release download "$UP_TAG" -R "$UPSTREAM" -D "$WORK/rel" -p "*-$SOC-*.7z*" -p SHA256SUMS
-          (cd "$WORK/rel" && sha256sum -c --ignore-missing SHA256SUMS)
+          if [ "$IMAGE_FORMAT" = zstd ]; then
+            if [ -n "$IMAGE_URL" ]; then
+              curl --fail --location --retry 5 --output "$WORK/rel/$IMAGE_NAME" "$IMAGE_URL"
+            else
+              gh release download "$UP_TAG" -R "$UPSTREAM" -D "$WORK/rel" -p "$IMAGE_NAME"
+            fi
+            printf '%s  %s\n' "$IMAGE_SHA256" "$IMAGE_NAME" | (cd "$WORK/rel" && sha256sum -c -)
+          else
+            gh release download "$UP_TAG" -R "$UPSTREAM" -D "$WORK/rel" -p "*-$SOC-*.7z*" -p SHA256SUMS
+            (cd "$WORK/rel" && sha256sum -c --ignore-missing SHA256SUMS)
+          fi
 
       - name: Fork components
         if: matrix.soc == 'sm8550'
         run: |
           mkdir -p "$WORK/assets"
           d="gh release download fork-assets -R $GITHUB_REPOSITORY -D $WORK/assets"
-          $d -p qcom-gyro-userspace-sm8550.tar.gz
-          $d -p "${{ needs.components.outputs.kernel_name }}"
+          if [ "$PREFIX" = steamos-arm ]; then
+            $d -p qcom-gyro-userspace-sm8550.tar.gz
+            $d -p "${{ needs.components.outputs.kernel_name }}"
+            mv "$WORK/assets/${{ needs.components.outputs.kernel_name }}" "$WORK/assets/kernel.tar.gz"
+          fi
           $d -p "${{ needs.components.outputs.ip_name }}"
           $d -p "${{ needs.components.outputs.va_name }}"
           $d -p "${{ needs.components.outputs.gamescope_name }}"
-          mv "$WORK/assets/${{ needs.components.outputs.kernel_name }}" "$WORK/assets/kernel.tar.gz"
           mv "$WORK/assets/${{ needs.components.outputs.ip_name }}" "$WORK/assets/inputplumber"
           mv "$WORK/assets/${{ needs.components.outputs.va_name }}" "$WORK/assets/vaapi.tar.gz"
           mv "$WORK/assets/${{ needs.components.outputs.gamescope_name }}" "$WORK/assets/gamescope.tar.gz"
@@ -126,16 +158,20 @@ jobs:
 
       - name: Build package
         run: |
-          first=$(ls "$WORK"/rel/*-"$SOC"-*.7z.001)
+          if [ "$IMAGE_FORMAT" = zstd ]; then
+            first="$WORK/rel/$IMAGE_NAME"
+          else
+            first=$(ls "$WORK"/rel/*-"$SOC"-*.7z.001)
+          fi
           sudo FORK_REPO="$GITHUB_REPOSITORY" WORKDIR="$WORK" FORK_ASSETS="${FORK_ASSETS:-}" \
             scripts/fork-build-sau.sh "$first" "$SOC" "$VERSION" "$RUNNER_TEMP/sau.pem" "$WORK/out"
           rm -rf "$WORK/rel"
           sudo chown -R "$USER" "$WORK/out"
-          scripts/split-update.sh "$WORK/out/steamos-arm-$SOC-$VERSION.sau"
+          scripts/split-update.sh "$WORK/out/$PREFIX-$SOC-$VERSION.sau"
           ls -la "$WORK/out"
 
       - name: Upload to the release
-        run: gh release upload "$TAG" "$WORK"/out/steamos-arm-* -R "$GITHUB_REPOSITORY" --clobber
+        run: gh release upload "$TAG" "$WORK"/out/"$PREFIX"-* -R "$GITHUB_REPOSITORY" --clobber
 
       - name: Remove the key
         if: always()

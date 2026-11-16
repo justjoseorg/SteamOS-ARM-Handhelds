@@ -7,6 +7,10 @@ name: Fork components
 # A component is only rebuilt when its sources changed.
 on:
   workflow_call:
+    inputs:
+      upstream_kernel:
+        type: boolean
+        default: false
     outputs:
       kernel_name:
         value: ${{ jobs.plan.outputs.kernel_name }}
@@ -17,19 +21,11 @@ on:
       gamescope_name:
         value: ${{ jobs.plan.outputs.gamescope_name }}
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - external-and-mods/kernel-sm8550/**
-      - external-and-mods/kernel-common/**
-      - external-and-mods/InputPlumber/**.patch
-      - scripts/build-inputplumber-konkr.sh
-      - external-and-mods/v4l2-vaapi/**
-      - external-and-mods/gamescope/**
-      - scripts/build-gamescope-component.sh
-      - scripts/test-*-update.py
-      - fork/hooks/**
-      - .github/workflows/fork-components.yml
+    inputs:
+      upstream_kernel:
+        description: Keep the release image's kernel and gyro stack (required for Zaviya 1.5+)
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -58,6 +54,8 @@ jobs:
           python3 scripts/test-av1-update.py
           python3 scripts/test-gamescope-update.py
       - id: p
+        env:
+          UPSTREAM_KERNEL: ${{ inputs.upstream_kernel }}
         run: |
           h() { git ls-files -z "$@" | xargs -0 sha256sum | sha256sum | cut -c1-12; }
           k=$(h external-and-mods/kernel-sm8550 external-and-mods/kernel-common)
@@ -69,7 +67,11 @@ jobs:
           echo "va_name=v4l2-vaapi-arm64-$v.tar.gz" >> "$GITHUB_OUTPUT"
           echo "gamescope_name=gamescope-arm64-$g.tar.gz" >> "$GITHUB_OUTPUT"
           have=$(gh release view fork-assets -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
-          grep -qx "kernel-sm8550-$k.tar.gz" <<<"$have" && echo "kernel=false" >> "$GITHUB_OUTPUT" || echo "kernel=true" >> "$GITHUB_OUTPUT"
+          if [ "$UPSTREAM_KERNEL" = true ]; then
+            echo "kernel=false" >> "$GITHUB_OUTPUT"
+          else
+            grep -qx "kernel-sm8550-$k.tar.gz" <<<"$have" && echo "kernel=false" >> "$GITHUB_OUTPUT" || echo "kernel=true" >> "$GITHUB_OUTPUT"
+          fi
           grep -qx "inputplumber-$i" <<<"$have" && echo "ip=false" >> "$GITHUB_OUTPUT" || echo "ip=true" >> "$GITHUB_OUTPUT"
           grep -qx "v4l2-vaapi-arm64-$v.tar.gz" <<<"$have" && echo "va=false" >> "$GITHUB_OUTPUT" || echo "va=true" >> "$GITHUB_OUTPUT"
           grep -qx "gamescope-arm64-$g.tar.gz" <<<"$have" && echo "gamescope=false" >> "$GITHUB_OUTPUT" || echo "gamescope=true" >> "$GITHUB_OUTPUT"

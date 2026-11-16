@@ -8,8 +8,10 @@ set -euo pipefail
 A="${FORK_ASSETS:?FORK_ASSETS not set}"
 R="$ROOTFS"
 
-tar -xzf "$A/qcom-gyro-userspace-sm8550.tar.gz" -C "$R" --no-same-owner
 install -m 0755 "$A/inputplumber" "$R/usr/bin/inputplumber"
+# 1.5 already carries the upstream gyro stack and 7.4 kernel. Do not downgrade them.
+[[ "${FORK_UPSTREAM_KERNEL:-0}" == 1 ]] && exit 0
+tar -xzf "$A/qcom-gyro-userspace-sm8550.tar.gz" -C "$R" --no-same-owner
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 tar -xzf "$A/kernel.tar.gz" -C "$T"
