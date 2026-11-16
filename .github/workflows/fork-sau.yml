@@ -29,7 +29,7 @@ concurrency:
   group: fork-sau
 
 env:
-  UPSTREAM: hashtagbasit/SteamOS-ARM-Port
+  UPSTREAM: hashtagbasit/Zaviya
   GH_TOKEN: ${{ github.token }}
 
 jobs:
@@ -49,43 +49,12 @@ jobs:
 
       - name: Plan
         id: plan
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          REBUILD: ${{ inputs.rebuild }}
         run: |
-          up="${{ inputs.upstream_tag }}"
-          [ -n "$up" ] || up=$(gh release list -R "$UPSTREAM" --exclude-drafts --exclude-pre-releases -L 1 --json tagName -q '.[0].tagName')
-          base="${up#v}"
-          [[ "$base" =~ ^[0-9]+(\.[0-9]+)*$ ]] || { echo "::error::upstream tag '$up' is not a plain version"; exit 1; }
-
-          have=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts -L 200 --json tagName -q '.[].tagName' \
-                 | sed -nE "s/^v${base//./\\.}\.([0-9]+)$/\1/p" | sort -n | tail -1)
-          # A new revision is due when upstream has a new release or this repo's
-          # main moved since the last revision was built.
-          head=$(git rev-parse HEAD)
-          if [ -n "$have" ] && [ "${{ inputs.rebuild }}" != "true" ] \
-             && gh release view "v$base.$have" -R "$GITHUB_REPOSITORY" --json body -q .body | grep -q "main@$head"; then
-            echo "v$base.$have already built from main@$head; nothing to do"
-            echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          echo "head=$head" >> "$GITHUB_OUTPUT"
-          rev=$(( ${have:-0} + 1 ))
-          version="$base.$rev"
-
-          socs=$(python3 - "$up" <<'PY'
-          import importlib.util, json, re, subprocess, sys
-          spec = importlib.util.spec_from_file_location('u', 'external-and-mods/konkr-update/konkr-update.py')
-          u = importlib.util.module_from_spec(spec); spec.loader.exec_module(u)
-          names = subprocess.run(['gh', 'release', 'view', sys.argv[1], '-R', 'hashtagbasit/SteamOS-ARM-Port',
-                                  '--json', 'assets', '-q', '.assets[].name'], capture_output=True, text=True, check=True).stdout.split()
-          found = sorted({m[1] for n in names if (m := re.match(r'.*-(sm\d{4})-.*\.7z\.001$', n)) and m[1] in u.SOC_MODELS})
-          print(json.dumps(found))
-          PY
-          )
-          [ "$socs" != "[]" ] || { echo "::error::no supported image in $up"; exit 1; }
-
-          echo "build=true" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "upstream_tag=$up" >> "$GITHUB_OUTPUT"
-          echo "socs=$socs" >> "$GITHUB_OUTPUT"
+          python3 scripts/test-fork-update-plan.py
+          python3 scripts/plan-fork-update.py
 
       - name: Create draft release
         if: steps.plan.outputs.build == 'true'

@@ -1,12 +1,12 @@
 name: Sync upstream
 
-# Keeps the default branch current with hashtagbasit/SteamOS-ARM-Port. Fork
+# Keeps the default branch current with hashtagbasit/Zaviya. Fork
 # changes live in fork/ (and any commits of yours), so merges are normally clean.
-# If a merge conflicts, an issue is opened instead of pushing.
+# If a merge conflicts, the job reports the files instead of pushing.
 #
 # Pushing upstream changes to .github/workflows needs a token with the
 # `workflow` scope: add it as the SYNC_TOKEN secret (a classic PAT with
-# repo + workflow). Without it the default token is used and such pushes fail.
+# repo + workflow). Without it, preserve this fork's managed workflows.
 on:
   schedule:
     - cron: '43 5 * * *'
@@ -14,7 +14,10 @@ on:
 
 permissions:
   contents: write
-  issues: write
+  actions: write
+
+concurrency:
+  group: fork-sync
 
 jobs:
   sync:
@@ -23,22 +26,36 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
           token: ${{ secrets.SYNC_TOKEN || github.token }}
 
       - name: Merge upstream
         env:
           GH_TOKEN: ${{ github.token }}
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/hashtagbasit/SteamOS-ARM-Port.git
+          git remote add upstream https://github.com/hashtagbasit/Zaviya.git
           git fetch -q upstream main
           if git merge-base --is-ancestor upstream/main HEAD; then echo "up to date"; exit 0; fi
-          if git merge --no-edit upstream/main; then
-            git push origin HEAD
-          else
+          git merge --no-commit --no-ff upstream/main || true
+          if [ -z "$SYNC_TOKEN" ]; then
+            git restore --source=HEAD --staged --worktree .github/workflows
+            echo "Preserved fork-managed workflows (no SYNC_TOKEN)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          conflicts=$(git diff --name-only --diff-filter=U)
+          if [ -n "$conflicts" ]; then
+            printf '## Upstream sync conflicts\n\n```\n%s\n```\n' "$conflicts" >> "$GITHUB_STEP_SUMMARY"
             git merge --abort
-            gh issue create --title "Upstream sync conflict" \
-              --body "Merging hashtagbasit/SteamOS-ARM-Port main into ${GITHUB_REF_NAME} conflicts. Merge it locally (\`git fetch upstream && git merge upstream/main\`), resolve and push." || true
+            echo "::error::Resolve the upstream conflicts listed in the job summary."
             exit 1
+          fi
+          git rev-parse -q --verify MERGE_HEAD >/dev/null
+          git commit --no-edit
+          git push origin "HEAD:$DEFAULT_BRANCH"
+          # GITHUB_TOKEN pushes do not trigger push workflows.
+          if [ -z "$SYNC_TOKEN" ]; then
+            gh workflow run fork-sau.yml --ref "$DEFAULT_BRANCH"
           fi
