@@ -123,7 +123,7 @@ static void test_surface(VADriverContextP ctx, uint32_t format)
 static void test_decode_recovery(VADriverContextP ctx)
 {
 	struct drv *d = DRV(ctx);
-	struct context c = {.drv = d, .cfg.profile = VAProfileAV1Profile0, .failed = 1};
+	struct context c = {.drv = d, .cfg.profile = VAProfileAV1Profile0, .failed = 1, .fd = -1};
 	struct surface s = {.ctx = &c, .fourcc = VA_FOURCC_NV12, .error = 1};
 	uint32_t sid = obj_add(d, O_SURFACE, &s);
 	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR);
@@ -133,6 +133,12 @@ static void test_decode_recovery(VADriverContextP ctx)
 	s.error = 0;
 	assert(SyncSurface(ctx, sid) == VA_STATUS_SUCCESS);
 	assert(c.failed);
+	c.failed = 0;
+	s.pending = 1;
+	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR);
+	assert(c.failed && s.error);
+	s.pending = 0;
+	s.error = 0;
 
 	c.target = &s;
 	VADecPictureParameterBufferAV1 pic = {0};

@@ -1051,8 +1051,8 @@ static VAStatus SyncSurface(VADriverContextP ctx, VASurfaceID sid)
 		st = VA_STATUS_ERROR_INVALID_SURFACE;
 	else {
 		/* EndPicture or dec_submit may already have waited for this surface. */
-		if (s->pending && s->ctx)
-			dec_wait(s->ctx, s, 1000);
+		if (s->pending && s->ctx && dec_wait(s->ctx, s, 1000))
+			s->error = 1;
 		if (s->error) {
 			st = VA_STATUS_ERROR_DECODING_ERROR;
 			if (s->ctx && s->ctx->cfg.profile == VAProfileAV1Profile0)
