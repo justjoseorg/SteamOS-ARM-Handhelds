@@ -120,6 +120,44 @@ static void test_surface(VADriverContextP ctx, uint32_t format)
 	close(fd);
 }
 
+static void test_decode_recovery(VADriverContextP ctx)
+{
+	struct drv *d = DRV(ctx);
+	struct context c = {.drv = d, .cfg.profile = VAProfileAV1Profile0, .failed = 1};
+	struct surface s = {.ctx = &c, .fourcc = VA_FOURCC_NV12, .error = 1};
+	uint32_t sid = obj_add(d, O_SURFACE, &s);
+	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR);
+	c.failed = 0;
+	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR);
+	assert(c.failed);
+	s.error = 0;
+	assert(SyncSurface(ctx, sid) == VA_STATUS_SUCCESS);
+	assert(c.failed);
+
+	c.target = &s;
+	VADecPictureParameterBufferAV1 pic = {0};
+	struct buffer b = {.type = VAPictureParameterBufferType, .data = (uint8_t *)&pic,
+			   .size = sizeof(pic)};
+	pic.pic_info_fields.bits.frame_type = 1;
+	pic.pic_info_fields.bits.show_frame = 1;
+	assert(render_av1(&c, &b) == VA_STATUS_SUCCESS && c.failed);
+	pic.pic_info_fields.bits.frame_type = 0;
+	pic.pic_info_fields.bits.show_frame = 0;
+	assert(render_av1(&c, &b) == VA_STATUS_SUCCESS && c.failed);
+	pic.pic_info_fields.bits.show_frame = 1;
+	assert(render_av1(&c, &b) == VA_STATUS_SUCCESS && !c.failed);
+
+	c.cfg.profile = VAProfileH264High;
+	c.failed = 1;
+	uint32_t cid = obj_add(d, O_CONTEXT, &c);
+	assert(EndPicture(ctx, cid) == VA_STATUS_ERROR_DECODING_ERROR && c.failed);
+	c.idr = 1;
+	assert(EndPicture(ctx, cid) == VA_STATUS_SUCCESS && !c.failed);
+	obj_del(d, O_CONTEXT, cid);
+	obj_del(d, O_SURFACE, sid);
+	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_INVALID_SURFACE);
+}
+
 int main(void)
 {
 	struct drv d = {.av1 = 1, .p010 = 1, .render_fd = -1};
@@ -136,6 +174,7 @@ int main(void)
 	test_config(&ctx);
 	test_surface(&ctx, VA_FOURCC_NV12);
 	test_surface(&ctx, VA_FOURCC_P010);
+	test_decode_recovery(&ctx);
 	VAImageFormat images[2];
 	int count;
 	assert(QueryImageFormats(&ctx, images, &count) == VA_STATUS_SUCCESS && count == 2);

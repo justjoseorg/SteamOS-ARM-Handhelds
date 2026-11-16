@@ -855,6 +855,9 @@ static VAStatus render_av1(struct context *c, struct buffer *b)
 			return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 		}
 		c->have_pic = 1;
+		/* Clients flush in place; a shown key frame restores all references. */
+		if (c->av1.pic_info_fields.bits.frame_type == 0 && c->av1.pic_info_fields.bits.show_frame)
+			c->failed = 0;
 		break;
 	case VASliceParameterBufferType: {
 		VASliceParameterBufferAV1 *ns = realloc(c->av1_slices, b->num * sizeof(*ns));
@@ -958,6 +961,8 @@ static VAStatus EndPicture(VADriverContextP ctx, VAContextID cid)
 		UNLOCK(d);
 		return st;
 	}
+	if (c->failed && c->idr)
+		c->failed = 0;
 	if (c->failed || !c->nal_len) {
 		c->target->error = 1;
 		UNLOCK(d);
@@ -1044,8 +1049,16 @@ static VAStatus SyncSurface(VADriverContextP ctx, VASurfaceID sid)
 	VAStatus st = VA_STATUS_SUCCESS;
 	if (!s)
 		st = VA_STATUS_ERROR_INVALID_SURFACE;
-	else if (s->pending && s->ctx && dec_wait(s->ctx, s, 1000))
-		st = VA_STATUS_ERROR_DECODING_ERROR;
+	else {
+		/* EndPicture or dec_submit may already have waited for this surface. */
+		if (s->pending && s->ctx)
+			dec_wait(s->ctx, s, 1000);
+		if (s->error) {
+			st = VA_STATUS_ERROR_DECODING_ERROR;
+			if (s->ctx && s->ctx->cfg.profile == VAProfileAV1Profile0)
+				s->ctx->failed = 1;
+		}
+	}
 	UNLOCK(d);
 	return st;
 }
