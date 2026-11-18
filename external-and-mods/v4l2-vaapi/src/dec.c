@@ -6,7 +6,7 @@
  * clients' surfaces as dma-bufs and only the current target is queued, so
  * the firmware writes the picture straight into the surface VA was told to
  * use. When a surface's layout doesn't match what the hardware writes
- * (pitch a multiple of 128, chroma at pitch * height rounded up to 32), the
+ * (pitch a multiple of 128, or 256 for P010, chroma after 32-aligned rows), the
  * context falls back to driver-owned capture buffers and copies.
  */
 #include <errno.h>
@@ -31,6 +31,43 @@ static int xioctl(int fd, unsigned long req, void *arg)
 		r = ioctl(fd, req, arg);
 	while (r < 0 && errno == EINTR);
 	return r;
+}
+
+#ifndef V4L2_PIX_FMT_AV1
+#define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
+#endif
+
+static int dec_has_format(const char *path, uint32_t type, uint32_t format)
+{
+	int fd = open(path, O_RDWR | O_CLOEXEC), ok = 0;
+	if (fd < 0)
+		return 0;
+	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		struct v4l2_format output = {.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
+		output.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_AV1;
+		output.fmt.pix_mp.num_planes = 1;
+		if (xioctl(fd, VIDIOC_S_FMT, &output) ||
+		    output.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_AV1) {
+			close(fd);
+			return 0;
+		}
+	}
+	struct v4l2_fmtdesc f = {.type = type};
+	for (f.index = 0; !xioctl(fd, VIDIOC_ENUM_FMT, &f); f.index++)
+		if (f.pixelformat == format)
+			ok = 1;
+	close(fd);
+	return ok;
+}
+
+int dec_has_av1(const char *path)
+{
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_AV1);
+}
+
+int dec_has_p010(const char *path)
+{
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_PIX_FMT_P010);
 }
 
 int dec_find(char *path, size_t len)
@@ -83,7 +120,8 @@ int dec_open(struct context *c)
 	xioctl(c->fd, VIDIOC_SUBSCRIBE_EVENT, &sub);
 
 	struct v4l2_format f = {.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
-	f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264;
+	f.fmt.pix_mp.pixelformat = c->cfg.profile == VAProfileAV1Profile0 ? V4L2_PIX_FMT_AV1 :
+				   V4L2_PIX_FMT_H264;
 	f.fmt.pix_mp.width = c->width;
 	f.fmt.pix_mp.height = c->height;
 	f.fmt.pix_mp.num_planes = 1;
@@ -150,6 +188,8 @@ static void cap_release(struct context *c)
 		.memory = c->copy_mode ? V4L2_MEMORY_MMAP : V4L2_MEMORY_DMABUF};
 	xioctl(c->fd, VIDIOC_REQBUFS, &rb);
 	c->cap_ready = 0;
+	c->cap_count = 0;
+	c->next_slot = 0;
 }
 
 void dec_close(struct context *c)
@@ -329,14 +369,26 @@ static int cap_setup(struct context *c, struct surface *target)
 	    f.fmt.pix_mp.plane_fmt[0].bytesperline, f.fmt.pix_mp.plane_fmt[0].sizeimage);
 
 	/* Ask for the target's own layout; the hardware rounds it the same way. */
-	f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
-	if (target->pitch >= w && target->uv_offset % target->pitch == 0 &&
+	unsigned bytes = video_sample_bytes(target->fourcc);
+	if (!bytes) {
+		dbg(c->drv, "unsupported capture surface format %#x", target->fourcc);
+		return -1;
+	}
+	uint32_t format = target->fourcc == VIDEO_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+	f.fmt.pix_mp.pixelformat = format;
+	if (target->pitch / bytes >= w && target->uv_offset % target->pitch == 0 &&
 	    target->uv_offset / target->pitch >= h) {
-		f.fmt.pix_mp.width = target->pitch;
+		f.fmt.pix_mp.width = target->pitch / bytes;
 		f.fmt.pix_mp.height = target->uv_offset / target->pitch;
 	}
 	if (xioctl(c->fd, VIDIOC_S_FMT, &f))
 		return -1;
+	if (f.fmt.pix_mp.pixelformat != format) {
+		dbg(c->drv, "capture format %#x requested, decoder returned %#x",
+		    format, f.fmt.pix_mp.pixelformat);
+		return -1;
+	}
+	c->cap_fourcc = target->fourcc;
 	c->cap_pitch = f.fmt.pix_mp.plane_fmt[0].bytesperline;
 	c->cap_height = f.fmt.pix_mp.height;
 	c->cap_size = f.fmt.pix_mp.plane_fmt[0].sizeimage;
@@ -364,21 +416,24 @@ static int cap_setup(struct context *c, struct surface *target)
 			struct v4l2_buffer b = {.index = i, .type = rb.type, .memory = rb.memory,
 				.m.planes = pl, .length = 1};
 			if (xioctl(c->fd, VIDIOC_QUERYBUF, &b))
-				return -1;
+				goto fail;
 			void *m = mmap(NULL, pl[0].length, PROT_READ, MAP_SHARED, c->fd,
 				       pl[0].m.mem_offset);
 			if (m == MAP_FAILED)
-				return -1;
+				goto fail;
 			c->cap_map[i] = m;
 			if (queue_cap_slot(c, i))
-				return -1;
+				goto fail;
 		}
 	}
 	int type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	if (xioctl(c->fd, VIDIOC_STREAMON, &type))
-		return -1;
+		goto fail;
 	c->cap_ready = 1;
 	return 0;
+fail:
+	cap_release(c);
+	return -1;
 }
 
 static int bind_target(struct context *c, struct surface *s)
@@ -447,6 +502,10 @@ static struct surface *find_pending(struct context *c, uint64_t ts)
 
 int dec_submit(struct context *c, const uint8_t *data, size_t len, struct surface *target)
 {
+	if (c->cap_ready && c->cap_fourcc != target->fourcc) {
+		dbg(c->drv, "surface bit depth changed within a decoder context");
+		return -1;
+	}
 	int idx = -1;
 	for (int tries = 0; idx < 0 && tries < 100; tries++) {
 		reclaim_output(c);
@@ -499,9 +558,13 @@ int dec_submit(struct context *c, const uint8_t *data, size_t len, struct surfac
 	inflight_add(c, target);
 
 	if (!c->cap_ready) {
-		if (wait_event(c, 2000) || cap_setup(c, target)) {
+		if (!c->cap_format_known && !wait_event(c, 2000))
+			c->cap_format_known = 1;
+		if (!c->cap_format_known || cap_setup(c, target)) {
 			dbg(c->drv, "decoder never reported a format");
 			c->failed = 1;
+			target->pending = 0;
+			target->error = 1;
 			return -1;
 		}
 		if (!c->copy_mode && bind_target(c, target))
@@ -530,6 +593,15 @@ static void copy_out(struct context *c, unsigned slot, struct surface *s)
 	ioctl(s->fd, DMA_BUF_IOCTL_SYNC, &sy);
 }
 
+static int decode_error(struct context *c, struct surface *s)
+{
+	s->pending = 0;
+	s->error = 1;
+	if (c->cfg.profile == VAProfileAV1Profile0)
+		c->failed = 1;
+	return -1;
+}
+
 int dec_wait(struct context *c, struct surface *s, int timeout_ms)
 {
 	while (s->pending) {
@@ -540,22 +612,21 @@ int dec_wait(struct context *c, struct surface *s, int timeout_ms)
 			.m.planes = pl, .length = 1};
 		if (xioctl(c->fd, VIDIOC_DQBUF, &b)) {
 			if (errno != EAGAIN)
-				return -1;
+				return decode_error(c, s);
 			struct v4l2_event ev;
 			if (!xioctl(c->fd, VIDIOC_DQEVENT, &ev) &&
 			    ev.type == V4L2_EVENT_SOURCE_CHANGE) {
 				dbg(c->drv, "resolution change mid-stream");
 				cap_release(c);
+				c->cap_format_known = 1;
 				if (cap_setup(c, s) || (!c->copy_mode && bind_target(c, s)))
-					return -1;
+					return decode_error(c, s);
 				continue;
 			}
 			struct pollfd p = {.fd = c->fd, .events = POLLIN | POLLPRI};
 			if (poll(&p, 1, timeout_ms) <= 0) {
 				dbg(c->drv, "decode timeout (frame %llu)", (unsigned long long)s->ts);
-				s->pending = 0;
-				s->error = 1;
-				return -1;
+				return decode_error(c, s);
 			}
 			continue;
 		}
@@ -568,7 +639,9 @@ int dec_wait(struct context *c, struct surface *s, int timeout_ms)
 				copy_out(c, b.index, o);
 			if (o) {
 				o->pending = 0;
-				o->error = (b.flags & V4L2_BUF_FLAG_ERROR) != 0;
+				o->error = (b.flags & V4L2_BUF_FLAG_ERROR) || !pl[0].bytesused;
+				if (o->error)
+					decode_error(c, o);
 			}
 			queue_cap_slot(c, b.index);
 			continue;
@@ -581,6 +654,8 @@ int dec_wait(struct context *c, struct surface *s, int timeout_ms)
 			    (unsigned long long)ts, (unsigned long long)o->ts);
 		o->pending = 0;
 		o->error = (b.flags & V4L2_BUF_FLAG_ERROR) || !pl[0].bytesused;
+		if (o->error)
+			decode_error(c, o);
 		c->frames++;
 		if (c->newest && c->newest != o)
 			c->newest->replaced_ns = now_ns();

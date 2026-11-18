@@ -207,10 +207,11 @@ if [[ -e "${STEAMROOT}/.pyrowave-box64" && -x "${_sc_x86}" ]] && command -v box6
     mv -f "${_sc}" "${_sc}.arm64" 2>/dev/null || true
   fi
   if ! grep -q PYROWAVE_BOX64_WRAPPER "${_sc}" 2>/dev/null; then
+    _sc_root="${STEAMROOT//\'/\'\\\'\'}"
     cat >"${_sc}" <<EOF || true
 #!/bin/sh
-# PYROWAVE_BOX64_WRAPPER (written by RUNSTEAM.sh; remove ${STEAMROOT}/.pyrowave-box64 to undo)
-S='${STEAMROOT}'
+# PYROWAVE_BOX64_WRAPPER (written by RUNSTEAM.sh; remove .pyrowave-box64 to undo)
+S='${_sc_root}'
 exec env BOX64_EMULATED_LIBS=libSDL3_ttf.so.0 \\
   BOX64_LD_LIBRARY_PATH="\$S/steamrt64:\$S/ubuntu12_64:\$S/linux64" \\
   box64 "\$S/steamrt64/streaming_client" "\$@" >"\$S/logs/streaming_client_box64.log" 2>&1
@@ -220,7 +221,12 @@ EOF
 elif [[ -f "${_sc}.arm64" ]] && ! _sc_is_elf "${_sc}"; then
   mv -f "${_sc}.arm64" "${_sc}" 2>/dev/null || true
 fi
-unset _sc _sc_x86
+unset _sc _sc_x86 _sc_root
+if [[ -f /usr/lib/steamos/sm8550-steam-av1 ]]; then
+  if ! timeout --kill-after=1s 5s python3 /usr/lib/steamos/sm8550-steam-av1 "${STEAMROOT}" "${STEAM_RT_ARM64}"; then
+    echo "RUNSTEAM: keeping Steam's native codec availability" >&2
+  fi
+fi
 echo "RUNSTEAM: DISPLAY=${DISPLAY} GAMESCOPE_WAYLAND_DISPLAY=${GAMESCOPE_WAYLAND_DISPLAY} QT_QPA_PLATFORM=${QT_QPA_PLATFORM}"
 
 if [[ "$is_odin3" -eq 1 && -f /etc/sdl2/qcom-gamecontrollerdb.txt ]]; then
