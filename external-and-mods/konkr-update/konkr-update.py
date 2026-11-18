@@ -278,7 +278,14 @@ def recovery_runtime(dst, helper=BOOTIMG):
 def retarget_kernel(src, dst, rootarg, helper=BOOTIMG):
     import importlib.util
     spec = importlib.util.spec_from_file_location('bootimg', helper)
-    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    module = importlib.util.module_from_spec(spec)
+    # Importing the helper must not rewrite bytecode in the checksummed payload.
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     image = module.BootImg(src.read_bytes())
     if image.id != image.expected_id(): raise ValueError('KERNEL header checksum mismatch')
     # Older installed helpers only know the bootimg ramdisk.
