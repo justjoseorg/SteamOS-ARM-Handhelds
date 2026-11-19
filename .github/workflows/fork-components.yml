@@ -53,6 +53,7 @@ jobs:
         run: |
           python3 scripts/test-av1-update.py
           python3 scripts/test-gamescope-update.py
+          python3 scripts/test-portal-dsp-heap.py
       - id: p
         env:
           UPSTREAM_KERNEL: ${{ inputs.upstream_kernel }}

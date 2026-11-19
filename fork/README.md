@@ -15,6 +15,13 @@ The job reads modern image names and hashes from the upstream release's
 the image before extraction. It retains the modern image's kernel and gyro stack
 instead of replacing them with the fork's legacy 7.2 build.
 
+For the Odin 2 Portal, the modern boot-image hook corrects the ADSP remote heap:
+Linux 7.4 assigns it to the DSP at probe, so it must be `no-map`, not a reusable
+CMA pool. Otherwise buffered I/O can allocate DSP-protected pages and trigger
+kernel external aborts. The hook changes only that reservation in the Portal
+device tree, preserves the other device trees and compressed kernel, and
+recomputes the boot-image checksum. Unexpected layouts fail the build.
+
 ```
 upstream release ──► fork-sau.yml ──► image + fork/ changes ──► signed .sau ──► this repo's Releases
 upstream main    ──► fork-sync.yml ──► merged into main
