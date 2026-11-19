@@ -48,6 +48,7 @@ struct drv {
 	int av1;                     /* the decoder takes AV1 too */
 	int hevc;
 	int p010;                    /* linear 10-bit capture is available */
+	int av1_p010, hevc_p010;
 	struct obj_table tab[O_MAX];
 	int debug;
 	FILE *log;
@@ -121,6 +122,7 @@ struct context {
 
 	/* picture being built */
 	struct surface *target;
+	int picture_failed;
 	VAPictureParameterBufferH264 pic;
 	int have_pic;
 	VAIQMatrixBufferH264 iq;
@@ -213,10 +215,11 @@ int av1_finish_refs(struct context *c);
 /* dec.c */
 int dec_has_av1(const char *path);
 int dec_has_hevc(const char *path);
-int dec_has_p010(const char *path);
+int dec_has_p010(const char *path, VAProfile profile);
 int dec_find(char *path, size_t len);
 int dec_open(struct context *c);
 void dec_close(struct context *c);
+int dec_reset(struct context *c);
 int dec_submit(struct context *c, const uint8_t *data, size_t len, struct surface *target);
 int dec_wait(struct context *c, struct surface *s, int timeout_ms);
 int surf_map(struct surface *s);

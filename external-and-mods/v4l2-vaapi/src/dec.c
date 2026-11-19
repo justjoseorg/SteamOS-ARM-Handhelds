@@ -37,42 +37,42 @@ static int xioctl(int fd, unsigned long req, void *arg)
 #define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
 #endif
 
-static int dec_has_format(const char *path, uint32_t type, uint32_t format)
+static int dec_has_format(const char *path, uint32_t type, uint32_t format, uint32_t codec)
 {
 	int fd = open(path, O_RDWR | O_CLOEXEC), ok = 0;
 	if (fd < 0)
 		return 0;
 	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		struct v4l2_format output = {.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
-		output.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_AV1;
+		output.fmt.pix_mp.pixelformat = codec;
 		output.fmt.pix_mp.num_planes = 1;
 		if (xioctl(fd, VIDIOC_S_FMT, &output) ||
-		    output.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_AV1) {
-			close(fd);
-			return 0;
-		}
+		    output.fmt.pix_mp.pixelformat != codec)
+			goto done;
 	}
 	struct v4l2_fmtdesc f = {.type = type};
 	for (f.index = 0; !xioctl(fd, VIDIOC_ENUM_FMT, &f); f.index++)
 		if (f.pixelformat == format)
 			ok = 1;
+done:
 	close(fd);
 	return ok;
 }
 
 int dec_has_av1(const char *path)
 {
-	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_AV1);
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_AV1, 0);
 }
 
 int dec_has_hevc(const char *path)
 {
-	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_HEVC);
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_HEVC, 0);
 }
 
-int dec_has_p010(const char *path)
+int dec_has_p010(const char *path, VAProfile profile)
 {
-	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_PIX_FMT_P010);
+	uint32_t codec = profile == VAProfileAV1Profile0 ? V4L2_PIX_FMT_AV1 : V4L2_PIX_FMT_HEVC;
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_PIX_FMT_P010, codec);
 }
 
 int dec_find(char *path, size_t len)
@@ -205,11 +205,42 @@ void dec_close(struct context *c)
 		cap_release(c);
 	int type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 	xioctl(c->fd, VIDIOC_STREAMOFF, &type);
-	for (int i = 0; i < c->out_count; i++)
+	for (int i = 0; i < c->out_count; i++) {
 		if (c->out[i].map)
 			munmap(c->out[i].map, c->out[i].len);
+		c->out[i].map = NULL;
+		c->out[i].len = 0;
+		c->out[i].queued = 0;
+	}
+	c->out_count = 0;
 	close(c->fd);
 	c->fd = -1;
+}
+
+int dec_reset(struct context *c)
+{
+	for (unsigned i = 0; i < MAX_INFLIGHT; i++) {
+		struct surface *s = c->inflight[i];
+		if (s && s->pending) {
+			s->pending = 0;
+			s->error = 1;
+		}
+		c->inflight[i] = NULL;
+	}
+	dec_close(c);
+	c->newest = NULL;
+	c->late_output = 0;
+	c->cap_format_known = 0;
+	memset(c->av1_slot, 0, sizeof(c->av1_slot));
+	memset(c->av1_refs, 0, sizeof(c->av1_refs));
+	free(c->av1_deferred.data);
+	memset(&c->av1_deferred, 0, sizeof(c->av1_deferred));
+	c->av1_seq_len = 0;
+	c->failed = 1;
+	if (dec_open(c))
+		return -1;
+	c->failed = 0;
+	return 0;
 }
 
 static int layout_fits(const struct surface *s, uint32_t pitch, uint32_t height)

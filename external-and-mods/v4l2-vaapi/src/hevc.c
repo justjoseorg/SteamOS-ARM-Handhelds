@@ -156,6 +156,11 @@ static int encode_nal(struct bytes *b, const uint8_t header[2],
 			return -1;
 		zeros = value ? 0 : zeros + 1;
 	}
+	if (zeros >= 2) {
+		static const uint8_t escape = 3;
+		if (append(b, &escape, 1))
+			return -1;
+	}
 	return 0;
 }
 
@@ -169,7 +174,7 @@ static uint8_t *unescape(const uint8_t *data, size_t *size)
 	for (size_t i = 0; i < *size; i++) {
 		uint8_t value = data[i];
 		if (zeros >= 2 && value == 3) {
-			if (i + 1 == *size || data[i + 1] > 3) {
+			if (i + 1 < *size && data[i + 1] > 3) {
 				free(raw);
 				return NULL;
 			}
@@ -213,6 +218,7 @@ struct refs {
 	uint8_t before[15], after[15], lt[15];
 	unsigned nb, na, nl, used;
 	uint32_t cycles[15];
+	uint8_t msb_present[15];
 };
 
 static int used(const VAPictureHEVC *p)
@@ -237,9 +243,20 @@ static int collect_refs(const VAPictureParameterBufferHEVC *p, struct refs *r)
 		if (ref->flags & VA_PICTURE_HEVC_LONG_TERM_REFERENCE) {
 			int64_t msb = ref->pic_order_cnt & ~(modulus - 1);
 			int64_t cycles = (current_msb - msb) / modulus;
-			if (cycles < 0 || cycles >= UINT32_MAX)
+			if (cycles >= UINT32_MAX)
 				return -1;
-			r->cycles[i] = (uint32_t)cycles;
+			if (cycles < 0) {
+				for (unsigned k = 0; k < 15; k++) {
+					const VAPictureHEVC *other = &p->ReferenceFrames[k];
+					if (k != i && other->picture_id != VA_INVALID_ID &&
+					    !(other->flags & VA_PICTURE_HEVC_INVALID) &&
+					    !((ref->pic_order_cnt ^ other->pic_order_cnt) & (modulus - 1)))
+						return -1;
+				}
+			} else {
+				r->cycles[i] = (uint32_t)cycles;
+				r->msb_present[i] = 1;
+			}
 			unsigned j = r->nl++;
 			while (j && r->cycles[r->lt[j - 1]] > r->cycles[i]) {
 				r->lt[j] = r->lt[j - 1];
@@ -292,8 +309,9 @@ static void write_refs(struct writer *w, const VAPictureParameterBufferHEVC *p,
 		unsigned index = r->lt[i];
 		put(w, bits, (uint32_t)p->ReferenceFrames[index].pic_order_cnt);
 		put(w, 1, used(&p->ReferenceFrames[index]));
-		put(w, 1, 1);
-		put_ue(w, r->cycles[index] - previous);
+		put(w, 1, r->msb_present[index]);
+		if (r->msb_present[index])
+			put_ue(w, r->cycles[index] - previous);
 		previous = r->cycles[index];
 	}
 }
@@ -469,8 +487,11 @@ fail:
 
 int hevc_add_slices(struct context *c, const struct buffer *data)
 {
-	if (!c->hevc_nslices || hevc_validate(c))
+	if (c->picture_failed || !c->hevc_nslices || hevc_validate(c)) {
+		c->picture_failed = 1;
+		c->nal_len = 0;
 		return -1;
+	}
 	struct bytes output = {.data = c->nal, .size = c->nal_len, .capacity = c->nal_cap};
 	int status = 0;
 	for (unsigned i = 0; i < c->hevc_nslices; i++) {
@@ -494,9 +515,11 @@ int hevc_add_slices(struct context *c, const struct buffer *data)
 		c->pps_used[pps / 8] |= 1u << (pps % 8);
 	}
 	c->nal = output.data;
-	c->nal_len = output.size;
+	c->nal_len = status ? 0 : output.size;
 	c->nal_cap = output.capacity;
 	c->hevc_nslices = 0;
+	if (status)
+		c->picture_failed = 1;
 	return status;
 }
 
@@ -521,7 +544,7 @@ static void ordering(struct writer *w, const struct context *c)
 	put(w, 1, 1);
 	for (unsigned i = 0; i < 7; i++) {
 		put_ue(w, c->hevc.sps_max_dec_pic_buffering_minus1);
-		put_ue(w, 0);
+		put_ue(w, c->hevc.sps_max_dec_pic_buffering_minus1);
 		put_ue(w, 0);
 	}
 }
@@ -679,7 +702,7 @@ static void write_pps(struct writer *w, const struct context *c, unsigned id)
 size_t hevc_build(struct context *c, uint8_t **out)
 {
 	*out = NULL;
-	if (hevc_validate(c) || !c->nal_len ||
+	if (c->picture_failed || hevc_validate(c) || !c->nal_len ||
 	    (c->hevc.pic_fields.bits.scaling_list_enabled_flag && !c->have_iq))
 		return 0;
 	struct bytes frame = {0};

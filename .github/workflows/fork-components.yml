@@ -159,17 +159,20 @@ jobs:
       - name: Check decoder and surface formats
         shell: bash
         run: |
-          gcc -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
+          flags="-g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined -fno-sanitize-recover=all"
+          gcc $flags \
             external-and-mods/v4l2-vaapi/tests/av1.c -o /tmp/test-av1
           /tmp/test-av1
-          gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
+          gcc $flags external-and-mods/v4l2-vaapi/tests/dec.c -lpthread -o /tmp/test-dec
+          /tmp/test-dec
+          gcc $flags \
             external-and-mods/v4l2-vaapi/tests/formats.c \
             external-and-mods/v4l2-vaapi/src/{av1,dec,h264,hevc}.c -lpthread -o /tmp/test-formats
           /tmp/test-formats
-          gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
+          gcc $flags \
             external-and-mods/v4l2-vaapi/tests/hevc.c -o /tmp/test-hevc
           /tmp/test-hevc
-          gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
+          gcc $flags \
             external-and-mods/v4l2-vaapi/tests/gbm.c -ldl -lpthread -o /tmp/test-gbm
           /tmp/test-gbm
       - name: Package
