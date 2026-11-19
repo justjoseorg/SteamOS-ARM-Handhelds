@@ -896,6 +896,8 @@ static VAStatus end_av1(struct drv *d, struct context *c)
 {
 	uint8_t *frame = NULL;
 	VAStatus st = VA_STATUS_ERROR_DECODING_ERROR;
+	if (c->av1_nslices)
+		c->picture_failed = 1;
 	if (c->have_pic && c->av1_ntiles && !c->picture_failed && c->failed &&
 	    c->av1.pic_info_fields.bits.frame_type == 0 && c->av1.pic_info_fields.bits.show_frame)
 		dec_reset(c);
@@ -960,6 +962,8 @@ static VAStatus end_hevc(struct context *c)
 {
 	uint8_t *frame = NULL;
 	VAStatus status = VA_STATUS_ERROR_DECODING_ERROR;
+	if (c->hevc_nslices)
+		c->picture_failed = 1;
 	if (!c->picture_failed && c->have_pic && c->nal_len && c->failed && c->idr)
 		dec_reset(c);
 	if (c->have_pic && !c->failed && !c->picture_failed) {
@@ -1054,12 +1058,15 @@ static VAStatus EndPicture(VADriverContextP ctx, VAContextID cid)
 		UNLOCK(d);
 		return st;
 	}
+	if (c->nslices)
+		c->picture_failed = 1;
 	if (c->failed && c->idr && c->nal_len && !c->picture_failed)
 		dec_reset(c);
 	if (c->picture_failed)
 		c->failed = 1;
 	if (c->failed || !c->nal_len) {
 		c->target->error = 1;
+		c->target->pending = 0;
 		UNLOCK(d);
 		return c->failed ? VA_STATUS_ERROR_DECODING_ERROR : VA_STATUS_SUCCESS;
 	}

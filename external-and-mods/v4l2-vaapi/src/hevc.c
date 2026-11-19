@@ -702,7 +702,7 @@ static void write_pps(struct writer *w, const struct context *c, unsigned id)
 size_t hevc_build(struct context *c, uint8_t **out)
 {
 	*out = NULL;
-	if (c->picture_failed || hevc_validate(c) || !c->nal_len ||
+	if (c->picture_failed || c->hevc_nslices || hevc_validate(c) || !c->nal_len ||
 	    (c->hevc.pic_fields.bits.scaling_list_enabled_flag && !c->have_iq))
 		return 0;
 	struct bytes frame = {0};
