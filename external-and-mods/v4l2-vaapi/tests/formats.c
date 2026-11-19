@@ -176,11 +176,10 @@ static void test_decode_recovery(VADriverContextP ctx)
 	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR);
 	c.failed = 0;
 	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR);
-	assert(c.failed);
+	assert(!c.failed);
 	s.error = 0;
 	assert(SyncSurface(ctx, sid) == VA_STATUS_SUCCESS);
-	assert(c.failed);
-	c.failed = 0;
+	assert(!c.failed);
 	s.pending = 1;
 	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR);
 	assert(c.failed && s.error);
@@ -199,6 +198,20 @@ static void test_decode_recovery(VADriverContextP ctx)
 	assert(render_av1(&c, &b) == VA_STATUS_SUCCESS && c.failed);
 	pic.pic_info_fields.bits.show_frame = 1;
 	assert(render_av1(&c, &b) == VA_STATUS_SUCCESS && !c.failed);
+	/* Reporting an old failed surface must not undo keyframe recovery. */
+	s.error = 1;
+	assert(SyncSurface(ctx, sid) == VA_STATUS_ERROR_DECODING_ERROR && !c.failed);
+	s.error = 0;
+
+	pic.current_frame = sid;
+	pic.current_display_picture = sid + 1;
+	pic.seq_info_fields.fields.film_grain_params_present = 1;
+	pic.film_grain_info.film_grain_info_fields.bits.apply_grain = 1;
+	c.failed = 1;
+	assert(render_av1(&c, &b) == VA_STATUS_ERROR_UNIMPLEMENTED);
+	assert(!c.have_pic && c.failed);
+	pic.film_grain_info.film_grain_info_fields.bits.apply_grain = 0;
+	assert(render_av1(&c, &b) == VA_STATUS_SUCCESS && c.have_pic && !c.failed);
 
 	c.cfg.profile = VAProfileH264High;
 	c.failed = 1;

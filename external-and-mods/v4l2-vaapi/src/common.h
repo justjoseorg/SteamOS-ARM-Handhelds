@@ -108,6 +108,7 @@ struct context {
 	int out_count;
 
 	int cap_ready;
+	int cap_format_known;        /* source change received; setup can be retried */
 	int copy_mode;               /* decode into driver buffers, then copy */
 	int decode_order;            /* firmware returns pictures in decode order */
 	int late_output;             /* pictures come back a frame late: don't wait for them */

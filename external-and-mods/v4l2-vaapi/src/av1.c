@@ -360,6 +360,8 @@ static size_t write_frame(struct context *c, uint8_t *out, size_t cap, uint32_t 
 		put(&b, pi->disable_frame_end_update_cdf, 1);
 
 	/* tile_info() */
+	if (!p->tile_cols || p->tile_cols > 64 || !p->tile_rows || p->tile_rows > 64)
+		return 0;
 	int sb128 = sq->use_128x128_superblock;
 	uint32_t sb_cols = sb128 ? (mi_cols + 31) >> 5 : (mi_cols + 15) >> 4;
 	uint32_t sb_rows = sb128 ? (mi_rows + 31) >> 5 : (mi_rows + 15) >> 4;
@@ -375,23 +377,23 @@ static size_t write_frame(struct context *c, uint8_t *out, size_t cap, uint32_t 
 	put(&b, pi->uniform_tile_spacing_flag, 1);
 	if (pi->uniform_tile_spacing_flag) {
 		/* find the log2 the client's tile counts came from */
-		int cl = min_cols_log2;
+		int cl = -1;
 		for (int l = min_cols_log2; l <= max_cols_log2; l++) {
 			uint32_t tw = (sb_cols + (1u << l) - 1) >> l;
-			if ((sb_cols + tw - 1) / tw == p->tile_cols &&
-			    (!p->tile_cols || p->width_in_sbs_minus_1[0] + 1u == tw ||
-			     p->tile_cols == 1)) {
+			if ((sb_cols + tw - 1) / tw == p->tile_cols) {
 				cl = l;
 				break;
 			}
 		}
+		if (cl < 0)
+			return 0;
 		cols_log2 = cl;
 		for (int l = min_cols_log2; l < cl; l++)
 			put(&b, 1, 1);
 		if (cl < max_cols_log2)
 			put(&b, 0, 1);
 		int min_rows_log2 = min_tiles_log2 - cols_log2 > 0 ? min_tiles_log2 - cols_log2 : 0;
-		int rl = min_rows_log2;
+		int rl = -1;
 		for (int l = min_rows_log2; l <= max_rows_log2; l++) {
 			uint32_t th = (sb_rows + (1u << l) - 1) >> l;
 			if ((sb_rows + th - 1) / th == p->tile_rows) {
@@ -399,6 +401,8 @@ static size_t write_frame(struct context *c, uint8_t *out, size_t cap, uint32_t 
 				break;
 			}
 		}
+		if (rl < 0)
+			return 0;
 		rows_log2 = rl;
 		for (int l = min_rows_log2; l < rl; l++)
 			put(&b, 1, 1);
@@ -406,9 +410,14 @@ static size_t write_frame(struct context *c, uint8_t *out, size_t cap, uint32_t 
 			put(&b, 0, 1);
 	} else {
 		uint32_t widest = 0, start = 0;
-		for (unsigned i = 0; i < p->tile_cols && start < sb_cols; i++) {
+		for (unsigned i = 0; i < p->tile_cols; i++) {
+			if (start >= sb_cols)
+				return 0;
 			uint32_t mw = sb_cols - start < max_w_sb ? sb_cols - start : max_w_sb;
-			uint32_t sz = p->width_in_sbs_minus_1[i] + 1u;
+			uint32_t sz = i + 1 == p->tile_cols ? sb_cols - start :
+				      p->width_in_sbs_minus_1[i] + 1u;
+			if (sz > mw)
+				return 0;
 			put_ns(&b, mw, sz - 1);
 			if (sz > widest)
 				widest = sz;
@@ -421,9 +430,14 @@ static size_t write_frame(struct context *c, uint8_t *out, size_t cap, uint32_t 
 		if (max_h_sb < 1)
 			max_h_sb = 1;
 		start = 0;
-		for (unsigned i = 0; i < p->tile_rows && start < sb_rows; i++) {
+		for (unsigned i = 0; i < p->tile_rows; i++) {
+			if (start >= sb_rows)
+				return 0;
 			uint32_t mh = sb_rows - start < max_h_sb ? sb_rows - start : max_h_sb;
-			uint32_t sz = p->height_in_sbs_minus_1[i] + 1u;
+			uint32_t sz = i + 1 == p->tile_rows ? sb_rows - start :
+				      p->height_in_sbs_minus_1[i] + 1u;
+			if (sz > mh)
+				return 0;
 			put_ns(&b, mh, sz - 1);
 			start += sz;
 		}

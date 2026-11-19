@@ -858,6 +858,7 @@ static VAStatus render_av1(struct context *c, struct buffer *b)
 {
 	switch (b->type) {
 	case VAPictureParameterBufferType:
+		c->have_pic = 0;
 		memset(&c->av1, 0, sizeof(c->av1));
 		memcpy(&c->av1, b->data, b->size < sizeof(c->av1) ? b->size : sizeof(c->av1));
 		if (c->av1.bit_depth_idx > 1 ||
@@ -865,6 +866,9 @@ static VAStatus render_av1(struct context *c, struct buffer *b)
 			dbg(c->drv, "av1: picture bit depth does not match its surface");
 			return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 		}
+		/* Grain needs distinct reference and display outputs, not one capture surface. */
+		if (c->av1.film_grain_info.film_grain_info_fields.bits.apply_grain)
+			return VA_STATUS_ERROR_UNIMPLEMENTED;
 		c->have_pic = 1;
 		/* Clients flush in place; a shown key frame restores all references. */
 		if (c->av1.pic_info_fields.bits.frame_type == 0 && c->av1.pic_info_fields.bits.show_frame)
@@ -1136,11 +1140,8 @@ static VAStatus SyncSurface(VADriverContextP ctx, VASurfaceID sid)
 		/* EndPicture or dec_submit may already have waited for this surface. */
 		if (s->pending && s->ctx && dec_wait(s->ctx, s, 1000))
 			s->error = 1;
-		if (s->error) {
+		if (s->error)
 			st = VA_STATUS_ERROR_DECODING_ERROR;
-			if (s->ctx && s->ctx->cfg.profile == VAProfileAV1Profile0)
-				s->ctx->failed = 1;
-		}
 	}
 	UNLOCK(d);
 	return st;

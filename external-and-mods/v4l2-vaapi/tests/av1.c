@@ -124,10 +124,130 @@ static uint8_t *build_deferred(struct context *c)
 	return frame;
 }
 
+struct reader {
+	uint8_t data[1024];
+	size_t bit, len;
+};
+
+static unsigned read_bits(struct reader *r, unsigned n)
+{
+	unsigned value = 0;
+	while (n--) {
+		assert(r->bit < r->len * 8);
+		value = (value << 1) | (r->data[r->bit >> 3] >> (7 - (r->bit & 7)) & 1);
+		r->bit++;
+	}
+	return value;
+}
+
+static unsigned read_ns(struct reader *r, unsigned n)
+{
+	unsigned bits = 0;
+	while ((1u << bits) <= n)
+		bits++;
+	unsigned cutoff = (1u << bits) - n;
+	unsigned value = read_bits(r, bits - 1);
+	return value < cutoff ? value : (value << 1) - cutoff + read_bits(r, 1);
+}
+
+static void tile_setup(struct context *c, unsigned w, unsigned h, unsigned cols, unsigned rows)
+{
+	setup(c);
+	memset(&c->av1, 0, sizeof(c->av1));
+	c->width = w;
+	c->height = h;
+	c->av1.frame_width_minus1 = w - 1;
+	c->av1.frame_height_minus1 = h - 1;
+	c->av1.tile_cols = cols;
+	c->av1.tile_rows = rows;
+	c->av1.pic_info_fields.bits.show_frame = 1;
+	c->av1.pic_info_fields.bits.disable_cdf_update = 1;
+	c->av1.base_qindex = 173;
+}
+
+static size_t tile_write(struct context *c, struct reader *r)
+{
+	uint8_t indices[7] = {0};
+	int tiles;
+	size_t refresh;
+	r->bit = 0;
+	r->len = write_frame(c, r->data, sizeof(r->data), 0xff, indices, &tiles, &refresh);
+	if (r->len) {
+		assert(tiles == c->av1.tile_cols * c->av1.tile_rows);
+		assert(read_bits(r, 1) == 0); /* show_existing_frame */
+		assert(read_bits(r, 2) == 0); /* key frame */
+		assert(read_bits(r, 1) == 1); /* show_frame */
+		assert(read_bits(r, 1) == 1); /* disable_cdf_update */
+		assert(read_bits(r, 1) == 0); /* allow_screen_content_tools */
+		assert(read_bits(r, 1) == 0); /* frame_size_override_flag */
+		assert(read_bits(r, 1) == 0); /* use_superres */
+		assert(read_bits(r, 1) == 0); /* render_and_frame_size_different */
+	}
+	return r->len;
+}
+
+static void test_tiles(struct context *c)
+{
+	struct reader r, original;
+	tile_setup(c, 1920, 1080, 4, 2);
+	c->av1.pic_info_fields.bits.uniform_tile_spacing_flag = 1;
+	c->av1.context_update_tile_id = 3;
+	assert(tile_write(c, &r));
+	original = r;
+	assert(read_bits(&r, 1) == 1);
+	assert(read_bits(&r, 3) == 6); /* column log2 = 2: 110 */
+	assert(read_bits(&r, 2) == 2); /* row log2 = 1: 10 */
+	assert(read_bits(&r, 3) == 3);
+	assert(read_bits(&r, 2) == 3);
+	assert(read_bits(&r, 8) == 173);
+	memset(c->av1.width_in_sbs_minus_1, 0xff, sizeof(c->av1.width_in_sbs_minus_1));
+	memset(c->av1.height_in_sbs_minus_1, 0xff, sizeof(c->av1.height_in_sbs_minus_1));
+	assert(tile_write(c, &r) == original.len);
+	assert(!memcmp(r.data, original.data, r.len));
+
+	tile_setup(c, 1920, 1080, 2, 2);
+	c->av1.width_in_sbs_minus_1[0] = 7;
+	c->av1.height_in_sbs_minus_1[0] = 4;
+	assert(tile_write(c, &r));
+	assert(read_bits(&r, 1) == 0);
+	assert(read_ns(&r, 30) == 7);
+	assert(read_ns(&r, 22) == 21); /* inferred final width */
+	assert(read_ns(&r, 17) == 4);
+	assert(read_ns(&r, 12) == 11); /* inferred final height */
+	assert(read_bits(&r, 2) == 0);
+	assert(read_bits(&r, 2) == 3);
+	assert(read_bits(&r, 8) == 173);
+
+	for (int vertical = 0; vertical < 2; vertical++) {
+		tile_setup(c, vertical ? 64 : 4096, vertical ? 4096 : 64,
+			   vertical ? 1 : 64, vertical ? 64 : 1);
+		assert(tile_write(c, &r));
+		assert(read_bits(&r, 1) == 0);
+		for (unsigned remaining = 64; remaining; remaining--)
+			assert(read_ns(&r, remaining) == 0);
+		assert(read_bits(&r, 6) == 0);
+		assert(read_bits(&r, 2) == 3);
+		assert(read_bits(&r, 8) == 173);
+	}
+
+	tile_setup(c, 1920, 1080, 3, 1);
+	c->av1.pic_info_fields.bits.uniform_tile_spacing_flag = 1;
+	assert(!tile_write(c, &r));
+	tile_setup(c, 1920, 1080, 2, 1);
+	c->av1.width_in_sbs_minus_1[0] = 30;
+	assert(!tile_write(c, &r));
+	c->av1.width_in_sbs_minus_1[0] = 29;
+	assert(!tile_write(c, &r));
+	tile_setup(c, 1920, 1080, 1, 2);
+	c->av1.height_in_sbs_minus_1[0] = 17;
+	assert(!tile_write(c, &r));
+}
+
 int main(void)
 {
 	struct context *c = malloc(sizeof(*c));
 	assert(c);
+	test_tiles(c);
 	unsigned alignments = 0;
 	for (int bits = 0; bits < 8; bits++)
 		for (int slot = 0; slot < 8; slot++) {
@@ -207,6 +327,6 @@ int main(void)
 		}
 	}
 	free(c);
-	puts("AV1 reference tests passed");
+	puts("AV1 tile header and reference tests passed");
 	return 0;
 }
