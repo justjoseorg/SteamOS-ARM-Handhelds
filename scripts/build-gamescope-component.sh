@@ -43,7 +43,7 @@ meson setup "$WORK/build" "$WORK/src" \
     -Dlibdrm:auto_features=disabled -Dlibdrm:tests=false \
     -Dlibxkbcommon:enable-tools=false -Dlibxkbcommon:enable-x11=false \
     -Dlibxkbcommon:enable-docs=false -Dlibxkbcommon:enable-xkbregistry=false \
-    --force-fallback-for=wlroots,libliftoff,vkroots,wayland,wayland-protocols,libdrm,libxkbcommon,pixman
+    --force-fallback-for=wlroots,libliftoff,vkroots,libdisplay-info,wayland,wayland-protocols,libdrm,libxkbcommon,pixman
 meson compile -C "$WORK/build" -j 2
 meson test -C "$WORK/build" --print-errorlogs --suite gamescope
 meson install -C "$WORK/build" --no-rebuild --destdir "$WORK/install"

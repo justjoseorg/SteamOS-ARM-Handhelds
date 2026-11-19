@@ -120,7 +120,12 @@ jobs:
             || { echo "::error::SAU_SIGNING_KEY does not match fork/signing.pub"; exit 1; }
 
       - name: Install tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full zstd
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full zstd
+          if [ "$SOC" = sm8550 ]; then
+            sudo apt-get install -y -qq qemu-user-static
+          fi
 
       - name: Download upstream image
         run: |

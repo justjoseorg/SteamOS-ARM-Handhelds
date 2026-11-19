@@ -208,6 +208,10 @@ jobs:
       - name: Package
         run: |
           readelf -h out/gamescope | grep -q 'Machine:.*AArch64'
+          if readelf -d out/gamescope | grep -F 'Shared library: [libdisplay-info.so.'; then
+            echo "::error::Gamescope must statically link its pinned libdisplay-info fallback"
+            exit 1
+          fi
           tar -czf gamescope.tar.gz -C out gamescope scripts
       - uses: actions/upload-artifact@v4
         with:

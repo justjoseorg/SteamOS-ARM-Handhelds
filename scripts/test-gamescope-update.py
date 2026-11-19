@@ -18,6 +18,15 @@ class GamescopeUpdateTests(unittest.TestCase):
         self.work = Path(self.temp.name)
         self.rootfs = self.work / "rootfs"
         self.rootfs.mkdir()
+        self.bin = self.work / "bin"
+        self.bin.mkdir()
+        qemu = self.bin / "qemu-aarch64-static"
+        qemu.write_text(
+            '#!/bin/sh\n'
+            '[ "$1" = -L ] && [ "$2" = "$ROOTFS" ] && [ -s "$3" ] && [ "$4" = --version ] || exit 2\n'
+            'exit "${GAMESCOPE_TEST_RUNTIME_STATUS:-0}"\n'
+        )
+        qemu.chmod(0o755)
 
     def archive(self, files):
         with tarfile.open(self.work / "gamescope.tar.gz", "w:gz") as archive:
@@ -31,11 +40,13 @@ class GamescopeUpdateTests(unittest.TestCase):
                 entry.mode = 0o644
                 archive.addfile(entry, io.BytesIO(data))
 
-    def run_hook(self, soc):
+    def run_hook(self, soc, runtime_status=0):
         return subprocess.run(
             ["bash", str(HOOK)],
             env={**os.environ, "SOC": soc, "ROOTFS": str(self.rootfs),
-                 "FORK_ASSETS": str(self.work), "TMPDIR": str(self.work)},
+                 "FORK_ASSETS": str(self.work), "TMPDIR": str(self.work),
+                 "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+                 "GAMESCOPE_TEST_RUNTIME_STATUS": str(runtime_status)},
             capture_output=True, text=True,
         )
 
@@ -83,6 +94,13 @@ class GamescopeUpdateTests(unittest.TestCase):
 
     def test_missing_archive_fails(self):
         result = self.run_hook("sm8550")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(list(self.rootfs.iterdir()))
+        self.assertFalse(list(self.work.glob("tmp.*")))
+
+    def test_missing_runtime_dependency_fails_before_installation(self):
+        self.archive({"gamescope": b"test compositor", PROFILE: b"test profile"})
+        result = self.run_hook("sm8550", runtime_status=127)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(list(self.rootfs.iterdir()))
         self.assertFalse(list(self.work.glob("tmp.*")))
