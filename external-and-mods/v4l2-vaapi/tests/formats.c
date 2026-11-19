@@ -227,7 +227,9 @@ int main(void)
 	test_config(&ctx);
 	test_hevc_buffers();
 	test_surface(&ctx, VA_FOURCC_NV12);
+	d.av1 = 0;
 	test_surface(&ctx, VA_FOURCC_P010);
+	d.av1 = 1;
 	test_decode_recovery(&ctx);
 	VAImageFormat images[2];
 	int count;

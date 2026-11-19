@@ -128,7 +128,14 @@ jobs:
           sudo mkdir -p "$WORK/rel" "$WORK/out" && sudo chown -R "$USER" "$WORK"
           if [ "$IMAGE_FORMAT" = zstd ]; then
             if [ -n "$IMAGE_URL" ]; then
-              curl --fail --location --retry 5 --output "$WORK/rel/$IMAGE_NAME" "$IMAGE_URL"
+              for attempt in {1..20}; do
+                if curl --fail --location --retry 5 --continue-at - \
+                    --output "$WORK/rel/$IMAGE_NAME" "$IMAGE_URL"; then
+                  break
+                fi
+                [ "$attempt" -lt 20 ] || exit 1
+                sleep 5
+              done
             else
               gh release download "$UP_TAG" -R "$UPSTREAM" -D "$WORK/rel" -p "$IMAGE_NAME"
             fi

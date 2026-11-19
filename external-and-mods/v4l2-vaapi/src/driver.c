@@ -354,7 +354,7 @@ static VAStatus CreateSurfaces2(VADriverContextP ctx, unsigned int format, unsig
 	VASurfaceAttribExternalBuffers *ext = NULL;
 
 	if (format != VA_RT_FORMAT_YUV420 &&
-	    !(format == VA_RT_FORMAT_YUV420_10 && d->av1 && d->p010))
+	    !(format == VA_RT_FORMAT_YUV420_10 && d->p010))
 		return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 	uint32_t fourcc = format == VA_RT_FORMAT_YUV420_10 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
 	uint32_t pitch, uv, size;
