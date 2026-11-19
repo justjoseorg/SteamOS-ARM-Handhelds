@@ -20,7 +20,7 @@ class GamescopeUpdateTests(unittest.TestCase):
         self.rootfs.mkdir()
         self.bin = self.work / "bin"
         self.bin.mkdir()
-        qemu = self.bin / "qemu-aarch64-static"
+        qemu = self.bin / "qemu-aarch64"
         qemu.write_text(
             '#!/bin/sh\n'
             '[ "$1" = -L ] && [ "$2" = "$ROOTFS" ] && [ -s "$3" ] && [ "$4" = --version ] || exit 2\n'

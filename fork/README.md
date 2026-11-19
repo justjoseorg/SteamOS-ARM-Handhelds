@@ -31,6 +31,10 @@ upstream main    ──► fork-sync.yml ──► merged into main
 Only `/usr`, `/opt`, `/etc` (minus accounts, `ssh`, etc.), the kernel and the two Decky plugins are shipped by updates,
 so changes must land there. Anything under `/etc/ssh` is deliberately preserved by the updater, hence SSH is enabled via `/usr`.
 
+Local SM8550 package builds require `qemu-user` (`qemu-aarch64`). The Gamescope
+hook checks that the compositor loads against the target rootfs before installing
+it, so build-runner-only shared-library dependencies cannot silently ship.
+
 ### SM8550 hardware video
 
 The VA-API bridge supports H.264, HEVC Main/Main10 and AV1 through the

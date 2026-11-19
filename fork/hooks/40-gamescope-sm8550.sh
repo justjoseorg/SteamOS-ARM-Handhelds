@@ -9,7 +9,7 @@ tar -xzf "$A/gamescope.tar.gz" -C "$T" -- gamescope scripts
 for path in gamescope scripts/00-gamescope/displays/ayn.odin2.portal.lua; do
     [[ -s "$T/$path" ]] || { echo "Gamescope component is missing $path" >&2; exit 1; }
 done
-qemu-aarch64-static -L "$ROOTFS" "$T/gamescope" --version
+qemu-aarch64 -L "$ROOTFS" "$T/gamescope" --version
 install -D -m 0755 "$T/gamescope" "$ROOTFS/usr/local/bin/gamescope"
 mkdir -p "$ROOTFS/usr/local/share/gamescope/scripts"
 cp -a --no-preserve=ownership "$T/scripts/." "$ROOTFS/usr/local/share/gamescope/scripts/"
