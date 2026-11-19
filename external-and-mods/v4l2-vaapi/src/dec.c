@@ -236,6 +236,8 @@ int dec_reset(struct context *c)
 	free(c->av1_deferred.data);
 	memset(&c->av1_deferred, 0, sizeof(c->av1_deferred));
 	c->av1_seq_len = 0;
+	c->sps_len = 0;
+	memset(c->pps_len, 0, sizeof(c->pps_len));
 	c->failed = 1;
 	if (dec_open(c))
 		return -1;
