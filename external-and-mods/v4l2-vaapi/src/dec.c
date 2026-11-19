@@ -55,6 +55,11 @@ int dec_has_av1(const char *path)
 	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_AV1);
 }
 
+int dec_has_hevc(const char *path)
+{
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_HEVC);
+}
+
 int dec_has_p010(const char *path)
 {
 	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_PIX_FMT_P010);
@@ -111,7 +116,7 @@ int dec_open(struct context *c)
 
 	struct v4l2_format f = {.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
 	f.fmt.pix_mp.pixelformat = c->cfg.profile == VAProfileAV1Profile0 ? V4L2_PIX_FMT_AV1 :
-				   V4L2_PIX_FMT_H264;
+				   hevc_profile(c->cfg.profile) ? V4L2_PIX_FMT_HEVC : V4L2_PIX_FMT_H264;
 	f.fmt.pix_mp.width = c->width;
 	f.fmt.pix_mp.height = c->height;
 	f.fmt.pix_mp.num_planes = 1;

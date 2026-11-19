@@ -945,7 +945,10 @@ def flatpak_video_accel(ref: str, spec: dict) -> list[str]:
 
 # Flatpaks not started by the hub that should still decode on the video core.
 # They get a persistent per-app override instead of launch options.
-VIDEO_ACCEL_EXTRA = {"org.mozilla.firefox": {}}
+VIDEO_ACCEL_EXTRA = {
+    "org.mozilla.firefox": {},
+    "io.github.streetpea.Chiaki4deck": {},
+}
 
 
 FIREFOX_PREFS_MARK = "// steamos-arm: hardware video decoding"

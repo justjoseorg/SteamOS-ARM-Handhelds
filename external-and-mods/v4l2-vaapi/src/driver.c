@@ -112,6 +112,8 @@ static int profile_ok(struct drv *d, VAProfile p)
 {
 	if (p == VAProfileAV1Profile0)
 		return d->av1;
+	if (hevc_profile(p))
+		return d->hevc && (p != VAProfileHEVCMain10 || d->p010);
 	for (unsigned i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
 		if (profiles[i] == p)
 			return 1;
@@ -123,6 +125,11 @@ static VAStatus QueryConfigProfiles(VADriverContextP ctx, VAProfile *list, int *
 	int n = 0;
 	for (unsigned i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
 		list[n++] = profiles[i];
+	if (DRV(ctx)->hevc) {
+		list[n++] = VAProfileHEVCMain;
+		if (DRV(ctx)->p010)
+			list[n++] = VAProfileHEVCMain10;
+	}
 	if (DRV(ctx)->av1)
 		list[n++] = VAProfileAV1Profile0;
 	*num = n;
@@ -143,7 +150,8 @@ static VAStatus QueryConfigEntrypoints(VADriverContextP ctx, VAProfile p,
 static uint32_t rt_formats(struct drv *d, VAProfile p)
 {
 	return VA_RT_FORMAT_YUV420 |
-		(p == VAProfileAV1Profile0 && d->p010 ? VA_RT_FORMAT_YUV420_10 : 0);
+		((p == VAProfileAV1Profile0 || p == VAProfileHEVCMain10) && d->p010 ?
+		 VA_RT_FORMAT_YUV420_10 : 0);
 }
 
 static uint32_t surface_rt_format(uint32_t fourcc)
@@ -658,6 +666,7 @@ static VAStatus DestroyContext(VADriverContextP ctx, VAContextID id)
 	}
 	dec_close(c);
 	free(c->slices);
+	free(c->hevc_slices);
 	free(c->av1_slices);
 	free(c->av1_deferred.data);
 	free(c->tiles);
@@ -784,11 +793,13 @@ static VAStatus BeginPicture(VADriverContextP ctx, VAContextID cid, VASurfaceID 
 		dec_wait(c, s, 1000);
 	s->ctx = c;
 	c->target = s;
+	c->have_pic = 0;
 	c->have_iq = 0;
 	c->nslices = 0;
 	c->nal_len = 0;
 	c->idr = 0;
 	c->av1_nslices = 0;
+	c->hevc_nslices = 0;
 	c->av1_ntiles = 0;
 	c->tiles_len = 0;
 	memset(c->pps_used, 0, sizeof(c->pps_used));
@@ -896,6 +907,68 @@ static VAStatus end_av1(struct drv *d, struct context *c)
 	return st;
 }
 
+static VAStatus render_hevc(struct context *c, const struct buffer *b)
+{
+	switch (b->type) {
+	case VAPictureParameterBufferType:
+		if (b->num != 1 || b->size < sizeof(c->hevc))
+			return VA_STATUS_ERROR_INVALID_PARAMETER;
+		memcpy(&c->hevc, b->data, sizeof(c->hevc));
+		if (hevc_validate(c))
+			return VA_STATUS_ERROR_INVALID_PARAMETER;
+		if (c->target->fourcc !=
+		    (c->hevc.bit_depth_luma_minus8 ? VA_FOURCC_P010 : VA_FOURCC_NV12))
+			return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+		c->have_pic = 1;
+		break;
+	case VAIQMatrixBufferType:
+		if (b->num != 1 || b->size < sizeof(c->hevc_iq))
+			return VA_STATUS_ERROR_INVALID_PARAMETER;
+		memcpy(&c->hevc_iq, b->data, sizeof(c->hevc_iq));
+		c->have_iq = 1;
+		break;
+	case VASliceParameterBufferType: {
+		if (!b->num || b->size != sizeof(*c->hevc_slices))
+			return VA_STATUS_ERROR_INVALID_PARAMETER;
+		VASliceParameterBufferHEVC *slices = realloc(c->hevc_slices,
+			(size_t)b->num * sizeof(*slices));
+		if (!slices)
+			return VA_STATUS_ERROR_ALLOCATION_FAILED;
+		c->hevc_slices = slices;
+		memcpy(slices, b->data, (size_t)b->num * sizeof(*slices));
+		c->hevc_nslices = b->num;
+		break;
+	}
+	case VASliceDataBufferType:
+		if (!c->have_pic || hevc_add_slices(c, b))
+			return VA_STATUS_ERROR_INVALID_PARAMETER;
+		break;
+	default:
+		break;
+	}
+	return VA_STATUS_SUCCESS;
+}
+
+static VAStatus end_hevc(struct context *c)
+{
+	uint8_t *frame = NULL;
+	VAStatus status = VA_STATUS_ERROR_DECODING_ERROR;
+	if (c->failed && c->idr)
+		c->failed = 0;
+	if (c->have_pic && !c->failed) {
+		size_t size = hevc_build(c, &frame);
+		if (size && !dec_submit(c, frame, size, c->target) &&
+		    !dec_wait(c, c->target, 1000))
+			status = VA_STATUS_SUCCESS;
+	}
+	free(frame);
+	if (status != VA_STATUS_SUCCESS) {
+		c->target->error = 1;
+		c->failed = 1;
+	}
+	return status;
+}
+
 static VAStatus RenderPicture(VADriverContextP ctx, VAContextID cid, VABufferID *bufs, int n)
 {
 	struct drv *d = DRV(ctx);
@@ -910,6 +983,10 @@ static VAStatus RenderPicture(VADriverContextP ctx, VAContextID cid, VABufferID 
 		}
 		if (c->cfg.profile == VAProfileAV1Profile0) {
 			st = render_av1(c, b);
+			continue;
+		}
+		if (hevc_profile(c->cfg.profile)) {
+			st = render_hevc(c, b);
 			continue;
 		}
 		switch (b->type) {
@@ -957,6 +1034,12 @@ static VAStatus EndPicture(VADriverContextP ctx, VAContextID cid)
 	}
 	if (c->cfg.profile == VAProfileAV1Profile0) {
 		VAStatus st = end_av1(d, c);
+		c->target = NULL;
+		UNLOCK(d);
+		return st;
+	}
+	if (hevc_profile(c->cfg.profile)) {
+		VAStatus st = end_hevc(c);
 		c->target = NULL;
 		UNLOCK(d);
 		return st;
@@ -1310,7 +1393,8 @@ VAStatus __attribute__((visibility("default"))) __vaDriverInit_1_17(VADriverCont
 		return VA_STATUS_ERROR_UNKNOWN;
 	}
 	d->av1 = !getenv("MSM_VA_NO_AV1") && dec_has_av1(d->dec_path);
-	d->p010 = d->av1 && dec_has_p010(d->dec_path);
+	d->hevc = dec_has_hevc(d->dec_path);
+	d->p010 = (d->av1 || d->hevc) && dec_has_p010(d->dec_path);
 	dbg(d, "decoder %s%s", d->dec_path, d->av1 ? " (AV1 too)" : "");
 
 	ctx->pDriverData = d;

@@ -163,8 +163,11 @@ jobs:
           /tmp/test-av1
           gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
             external-and-mods/v4l2-vaapi/tests/formats.c \
-            external-and-mods/v4l2-vaapi/src/{av1,dec,h264}.c -lpthread -o /tmp/test-formats
+            external-and-mods/v4l2-vaapi/src/{av1,dec,h264,hevc}.c -lpthread -o /tmp/test-formats
           /tmp/test-formats
+          gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
+            external-and-mods/v4l2-vaapi/tests/hevc.c -o /tmp/test-hevc
+          /tmp/test-hevc
           gcc -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined \
             external-and-mods/v4l2-vaapi/tests/gbm.c -ldl -lpthread -o /tmp/test-gbm
           /tmp/test-gbm

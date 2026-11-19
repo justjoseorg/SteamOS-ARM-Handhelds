@@ -36,6 +36,53 @@ static void test_config(VADriverContextP ctx)
 	assert(QuerySurfaceAttributes(ctx, id, attrs, &n) == VA_STATUS_SUCCESS && n == 8);
 	assert(attrs[0].value.value.i == VA_FOURCC_NV12 && attrs[1].value.value.i == VA_FOURCC_P010);
 	assert(DestroyConfig(ctx, id) == VA_STATUS_SUCCESS);
+	assert(GetConfigAttributes(ctx, VAProfileHEVCMain, VAEntrypointVLD, &a, 1) == VA_STATUS_SUCCESS);
+	assert(a.value == VA_RT_FORMAT_YUV420);
+	assert(GetConfigAttributes(ctx, VAProfileHEVCMain10, VAEntrypointVLD, &a, 1) == VA_STATUS_SUCCESS);
+	assert(a.value == (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10));
+	d->hevc = 0;
+	assert(GetConfigAttributes(ctx, VAProfileHEVCMain, VAEntrypointVLD, &a, 1) ==
+	       VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+	d->hevc = 1;
+	d->p010 = 0;
+	assert(GetConfigAttributes(ctx, VAProfileHEVCMain10, VAEntrypointVLD, &a, 1) ==
+	       VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+	d->p010 = 1;
+	VAProfile profiles[MAX_PROFILES];
+	assert(QueryConfigProfiles(ctx, profiles, &count) == VA_STATUS_SUCCESS && count == 6);
+}
+
+static void test_hevc_buffers(void)
+{
+	struct surface surface = {.fourcc = VA_FOURCC_NV12};
+	struct context c = {.cfg = {.profile = VAProfileHEVCMain10}, .target = &surface};
+	VAPictureParameterBufferHEVC picture = {
+		.pic_width_in_luma_samples = 64, .pic_height_in_luma_samples = 64,
+		.bit_depth_luma_minus8 = 2, .bit_depth_chroma_minus8 = 2,
+	};
+	picture.pic_fields.bits.chroma_format_idc = 1;
+	struct buffer b = {.type = VAPictureParameterBufferType, .data = (uint8_t *)&picture,
+			   .size = sizeof(picture) - 1, .num = 1};
+	assert(render_hevc(&c, &b) == VA_STATUS_ERROR_INVALID_PARAMETER && !c.have_pic);
+	b.size++;
+	assert(render_hevc(&c, &b) == VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT && !c.have_pic);
+	surface.fourcc = VA_FOURCC_P010;
+	assert(render_hevc(&c, &b) == VA_STATUS_SUCCESS && c.have_pic);
+	c.cfg.profile = VAProfileHEVCMain;
+	assert(render_hevc(&c, &b) == VA_STATUS_ERROR_INVALID_PARAMETER);
+	c.cfg.profile = VAProfileHEVCMain10;
+	picture.pic_fields.bits.chroma_format_idc = 3;
+	assert(render_hevc(&c, &b) == VA_STATUS_ERROR_INVALID_PARAMETER);
+	VASliceParameterBufferHEVC slice = {0};
+	b = (struct buffer){.type = VASliceParameterBufferType, .data = (uint8_t *)&slice,
+			    .size = sizeof(slice), .num = 0};
+	assert(render_hevc(&c, &b) == VA_STATUS_ERROR_INVALID_PARAMETER);
+	b.num = 1;
+	b.size--;
+	assert(render_hevc(&c, &b) == VA_STATUS_ERROR_INVALID_PARAMETER);
+	b.size++;
+	assert(render_hevc(&c, &b) == VA_STATUS_SUCCESS && c.hevc_nslices == 1);
+	free(c.hevc_slices);
 }
 
 static void test_surface(VADriverContextP ctx, uint32_t format)
@@ -166,7 +213,7 @@ static void test_decode_recovery(VADriverContextP ctx)
 
 int main(void)
 {
-	struct drv d = {.av1 = 1, .p010 = 1, .render_fd = -1};
+	struct drv d = {.av1 = 1, .hevc = 1, .p010 = 1, .render_fd = -1};
 	pthread_mutex_init(&d.lock, NULL);
 	struct VADriverContext ctx = {.pDriverData = &d};
 	uint32_t pitch, uv, size;
@@ -178,6 +225,7 @@ int main(void)
 	assert(video_layout(VIDEO_P010, UINT32_MAX, 1080, &pitch, &uv, &size) == -1);
 	assert(video_layout(VIDEO_P010, 1920, 0, &pitch, &uv, &size) == -1);
 	test_config(&ctx);
+	test_hevc_buffers();
 	test_surface(&ctx, VA_FOURCC_NV12);
 	test_surface(&ctx, VA_FOURCC_P010);
 	test_decode_recovery(&ctx);

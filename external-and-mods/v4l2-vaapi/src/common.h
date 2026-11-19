@@ -24,10 +24,11 @@
 #include <va/va.h>
 #include <va/va_backend.h>
 #include <va/va_dec_av1.h>
+#include <va/va_dec_hevc.h>
 #include <va/va_drmcommon.h>
 #include "../formats.h"
 
-#define MAX_PROFILES 5
+#define MAX_PROFILES 6
 #define MAX_SLOTS 32
 #define NUM_OUT_BUFS 6
 #define MAX_INFLIGHT 64
@@ -45,6 +46,7 @@ struct drv {
 	int render_fd;               /* our own render node, never the client's */
 	char dec_path[32];           /* /dev/videoN of the decoder */
 	int av1;                     /* the decoder takes AV1 too */
+	int hevc;
 	int p010;                    /* linear 10-bit capture is available */
 	struct obj_table tab[O_MAX];
 	int debug;
@@ -153,6 +155,11 @@ struct context {
 	uint16_t pps_len[256];
 	struct pps_learned learned[256];
 
+	VAPictureParameterBufferHEVC hevc;
+	VAIQMatrixBufferHEVC hevc_iq;
+	VASliceParameterBufferHEVC *hevc_slices;
+	unsigned hevc_nslices;
+
 	uint64_t seq;
 	uint64_t frames;
 	struct surface *inflight[MAX_INFLIGHT];
@@ -188,6 +195,15 @@ int h264_parse_slice(struct context *c, const VASliceParameterBufferH264 *sp,
 size_t h264_write_sps(const struct context *c, uint8_t *out, size_t cap);
 size_t h264_write_pps(const struct context *c, int pps_id, uint8_t *out, size_t cap);
 
+/* hevc.c */
+static inline int hevc_profile(VAProfile profile)
+{
+	return profile == VAProfileHEVCMain || profile == VAProfileHEVCMain10;
+}
+int hevc_validate(const struct context *c);
+int hevc_add_slices(struct context *c, const struct buffer *data);
+size_t hevc_build(struct context *c, uint8_t **out);
+
 /* av1.c */
 int av1_add_tiles(struct context *c, const struct buffer *data);
 size_t av1_build(struct context *c, uint8_t **out);
@@ -195,6 +211,7 @@ int av1_finish_refs(struct context *c);
 
 /* dec.c */
 int dec_has_av1(const char *path);
+int dec_has_hevc(const char *path);
 int dec_has_p010(const char *path);
 int dec_find(char *path, size_t len);
 int dec_open(struct context *c);

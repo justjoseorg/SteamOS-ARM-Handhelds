@@ -31,6 +31,30 @@ upstream main    ──► fork-sync.yml ──► merged into main
 Only `/usr`, `/opt`, `/etc` (minus accounts, `ssh`, etc.), the kernel and the two Decky plugins are shipped by updates,
 so changes must land there. Anything under `/etc/ssh` is deliberately preserved by the updater, hence SSH is enabled via `/usr`.
 
+### SM8550 hardware video
+
+The VA-API bridge supports H.264, HEVC Main/Main10 and AV1 through the
+stateful V4L2 decoder. HEVC profiles are exposed only when the kernel advertises
+HEVC input; Main10 additionally requires P010 capture. The HEVC bridge rebuilds
+parameter sets and explicit references while preserving slice payloads and
+WPP/tile entry-point data.
+
+The Chiaki Flatpak gets a private driver copy and persistent VA-API overrides
+at login, including when started by a Steam shortcut. The matching rootfs patch
+is required because fork updates are assembled from upstream release images,
+not directly from `steamos-overlay/`. Select `vaapi` and H.265 in Chiaki after
+updating; H.264 remains available.
+
+For on-device frame comparisons (FFmpeg and ffprobe required), copy locally
+generated clips and run:
+
+```sh
+python3 scripts/test-vaapi-decode.py --driver-path /path/to/driver clips/*.hevc
+```
+
+This requires actual VA-API frames and checks every frame against software
+decoding; it does not establish that a live console session works.
+
 ## Versions
 
 Release `vX.Y.Z.N` is upstream `vX.Y.Z` revision `N`. A new upstream release starts at `.1`; run
